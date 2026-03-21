@@ -82,15 +82,38 @@ type alias PlayPauseConfig msg =
     }
 
 
-{-| Configuration for `seekBar`. -}
+{-| Configuration for `seekBar`.
+
+  - `onSeek` — callback for clicking a position on the seek bar.
+  - `onThumbnailHover` — optional callback for hover position (time, fraction).
+  - `onThumbnailLeave` — optional callback when the cursor leaves the seek bar.
+  - `onSeekDragStart` — callback when the user presses down on the seek bar
+    to begin a drag scrub (offsetX, barLeft, barWidth).
+  - `onSeekDragEnd` — callback when a drag scrub ends.
+  - `onSeekTouchDragStart` — callback for touch drag start (startClientX, barWidth).
+  - `onSeekTouchDragMove` — callback for touch drag move (currentClientX).
+  - `onNoOp` — a no-operation message for unhandled keyboard keys.
+  - `currentTime` — current playback position in seconds.
+  - `duration` — total video duration in seconds.
+  - `buffered` — list of buffered time ranges.
+  - `showThumbnail` — whether to show thumbnail on hover.
+  - `chapters` — chapter markers to display on the seek bar.
+
+-}
 type alias SeekBarConfig msg =
     { onSeek : Float -> msg
     , onThumbnailHover : Maybe (Float -> Float -> msg)
     , onThumbnailLeave : Maybe msg
+    , onSeekDragStart : Float -> Float -> Float -> msg
+    , onSeekDragEnd : msg
+    , onSeekTouchDragStart : Float -> Float -> msg
+    , onSeekTouchDragMove : Float -> msg
+    , onNoOp : msg
     , currentTime : Float
     , duration : Float
     , buffered : List { start : Float, end : Float }
     , showThumbnail : Bool
+    , chapters : List { startTime : Float, endTime : Float, title : String }
     }
 
 
@@ -190,20 +213,28 @@ playPauseButton cfg =
         ]
 
 
-{-| A seek bar showing playback position, buffer fill, and an optional
-thumbnail preview on hover.
+{-| A seek bar showing playback position, buffer fill, chapter markers,
+and an optional thumbnail preview on hover.
 
 Clicking or dragging the bar seeks to a new position. Position is
-reported as a time in seconds computed from the click offset.
+reported as a time in seconds computed from the click offset. The bar
+supports mouse drag scrubbing, touch drag scrubbing, and keyboard
+arrow-key seeking.
 
     Video.Controls.seekBar
         { onSeek = SeekTo
         , onThumbnailHover = Just ThumbnailHovering
         , onThumbnailLeave = Just ThumbnailLeft
+        , onSeekDragStart = SeekDragStart
+        , onSeekDragEnd = SeekDragEnd
+        , onSeekTouchDragStart = SeekTouchDragStart
+        , onSeekTouchDragMove = SeekTouchDragMove
+        , onNoOp = NoOp
         , currentTime = state.currentTime
         , duration = state.duration
         , buffered = state.buffered
         , showThumbnail = True
+        , chapters = state.chapters
         }
 
 -}
@@ -246,6 +277,38 @@ seekBar cfg =
 
                 _ ->
                     []
+
+        dragHandlers =
+            [ Events.on "mousedown"
+                (Decode.map3
+                    (\offsetX clientX barWidth ->
+                        cfg.onSeekDragStart offsetX (clientX - offsetX) barWidth
+                    )
+                    (Decode.field "offsetX" Decode.float)
+                    (Decode.field "clientX" Decode.float)
+                    (Decode.at [ "currentTarget", "offsetWidth" ] Decode.float)
+                )
+            , Events.on "touchstart"
+                (Decode.map2
+                    (\clientX barWidth -> cfg.onSeekTouchDragStart clientX barWidth)
+                    (Decode.at [ "changedTouches", "0", "clientX" ] Decode.float)
+                    (Decode.at [ "currentTarget", "offsetWidth" ] Decode.float)
+                )
+            , Events.on "touchmove"
+                (Decode.map cfg.onSeekTouchDragMove
+                    (Decode.at [ "changedTouches", "0", "clientX" ] Decode.float)
+                )
+            , Events.on "touchend" (Decode.succeed cfg.onSeekDragEnd)
+            ]
+
+        keyboardHandler =
+            Events.on "keydown"
+                (Decode.map
+                    (\key ->
+                        seekBarKeyToMsg cfg key
+                    )
+                    (Decode.field "key" Decode.string)
+                )
     in
     Html.div
         ([ Css.inlineStyle
@@ -262,10 +325,14 @@ seekBar cfg =
          , Attr.attribute "aria-valuemin" "0"
          , Attr.attribute "aria-valuemax" (String.fromFloat cfg.duration)
          , Attr.attribute "aria-valuenow" (String.fromFloat cfg.currentTime)
+         , Attr.attribute "tabindex" "0"
          , seekOnClick
-         ] ++ hoverHandlers)
+         , keyboardHandler
+         ] ++ hoverHandlers ++ dragHandlers)
         [ -- All buffered ranges
           Html.div [] (List.map (bufferedRangeDiv cfg.duration) cfg.buffered)
+        , -- Chapter markers
+          Html.div [] (List.map (chapterMarkerDiv cfg.duration) cfg.chapters)
         , -- Playback progress
           Html.div
             [ Css.inlineStyle
@@ -294,6 +361,16 @@ seekBar cfg =
             ]
             []
         ]
+
+
+seekBarKeyToMsg : SeekBarConfig msg -> String -> msg
+seekBarKeyToMsg cfg key =
+    if key == "ArrowLeft" then
+        cfg.onSeek (max 0 (cfg.currentTime - 5))
+    else if key == "ArrowRight" then
+        cfg.onSeek (min cfg.duration (cfg.currentTime + 5))
+    else
+        cfg.onNoOp
 
 
 {-| A combined volume slider and mute toggle button.
@@ -461,6 +538,7 @@ qualityMenu cfg =
                         )
                     ]
                 , Events.onClick (cfg.onSelect lvl.index)
+                , Attr.attribute "role" "menuitem"
                 ]
                 [ Html.text (levelLabel lvl) ]
 
@@ -478,6 +556,7 @@ qualityMenu cfg =
                         )
                     ]
                 , Events.onClick (cfg.onSelect -1)
+                , Attr.attribute "role" "menuitem"
                 ]
                 [ Html.text "Auto" ]
     in
@@ -505,6 +584,8 @@ qualityMenu cfg =
                     ]
                 , Attr.attribute "aria-label" "Quality"
                 , Attr.attribute "aria-expanded" (if cfg.isOpen then "true" else "false")
+                , Attr.attribute "aria-haspopup" "true"
+                , Attr.attribute "aria-controls" "video-quality-menu"
                 , Events.onClick (if cfg.isOpen then cfg.onClose else cfg.onOpen)
                 ]
                 [ Html.text currentLabel ]
@@ -521,6 +602,8 @@ qualityMenu cfg =
                         , Css.minWidth (Css.Value.px 80)
                         , Css.zIndex (Css.Value.int_ 40)
                         ]
+                    , Attr.attribute "role" "menu"
+                    , Attr.attribute "id" "video-quality-menu"
                     ]
                     (autoOption :: List.map renderOption cfg.levels)
               else
@@ -560,6 +643,7 @@ captionsMenu cfg =
                             )
                         ]
                     , Events.onClick (cfg.onSelect Nothing)
+                    , Attr.attribute "role" "menuitem"
                     ]
                     [ Html.text "Off" ]
 
@@ -577,6 +661,7 @@ captionsMenu cfg =
                             )
                         ]
                     , Events.onClick (cfg.onSelect (Just track.index))
+                    , Attr.attribute "role" "menuitem"
                     ]
                     [ Html.text (if track.label /= "" then track.label else track.language) ]
         in
@@ -590,6 +675,8 @@ captionsMenu cfg =
                 [ Css.inlineStyle iconButtonStyle
                 , Attr.attribute "aria-label" "Captions"
                 , Attr.attribute "aria-expanded" (if cfg.isOpen then "true" else "false")
+                , Attr.attribute "aria-haspopup" "true"
+                , Attr.attribute "aria-controls" "video-captions-menu"
                 , Events.onClick (if cfg.isOpen then cfg.onClose else cfg.onOpen)
                 ]
                 [ svgCaptions ]
@@ -606,6 +693,8 @@ captionsMenu cfg =
                         , Css.minWidth (Css.Value.px 100)
                         , Css.zIndex (Css.Value.int_ 40)
                         ]
+                    , Attr.attribute "role" "menu"
+                    , Attr.attribute "id" "video-captions-menu"
                     ]
                     (offOption :: List.map renderTrack cfg.tracks)
               else
@@ -613,7 +702,7 @@ captionsMenu cfg =
             ]
 
 
-{-| A playback speed selector (0.25×–2×).
+{-| A playback speed selector (0.25x-2x).
 
     Video.Controls.speedMenu
         { onSelect = SetPlaybackRate
@@ -629,9 +718,9 @@ speedMenu cfg =
 
         formatRate r =
             if r == toFloat (round r) then
-                String.fromInt (round r) ++ "×"
+                String.fromInt (round r) ++ "x"
             else
-                String.fromFloat r ++ "×"
+                String.fromFloat r ++ "x"
 
         renderSpeed r =
             Html.li
@@ -647,6 +736,7 @@ speedMenu cfg =
                         )
                     ]
                 , Events.onClick (cfg.onSelect r)
+                , Attr.attribute "role" "menuitem"
                 ]
                 [ Html.text (formatRate r) ]
     in
@@ -669,6 +759,8 @@ speedMenu cfg =
                 ]
             , Attr.attribute "aria-label" "Playback speed"
             , Attr.attribute "aria-expanded" (if cfg.isOpen then "true" else "false")
+            , Attr.attribute "aria-haspopup" "true"
+            , Attr.attribute "aria-controls" "video-speed-menu"
             , Events.onClick (if cfg.isOpen then cfg.onClose else cfg.onOpen)
             ]
             [ Html.text (formatRate cfg.currentRate) ]
@@ -685,6 +777,8 @@ speedMenu cfg =
                     , Css.minWidth (Css.Value.px 80)
                     , Css.zIndex (Css.Value.int_ 40)
                     ]
+                , Attr.attribute "role" "menu"
+                , Attr.attribute "id" "video-speed-menu"
                 ]
                 (List.reverse (List.map renderSpeed speeds))
           else
@@ -740,6 +834,32 @@ bufferedRangeDiv totalDuration range =
             , Css.property "background-color" "var(--video-loaded-fill, rgba(255,255,255,0.4))"
             , Css.borderRadius (Css.Value.px 2)
             ]
+        ]
+        []
+
+
+chapterMarkerDiv : Float -> { startTime : Float, endTime : Float, title : String } -> Html.Html msg
+chapterMarkerDiv duration cue =
+    let
+        pct =
+            if duration > 0 then
+                cue.startTime / duration * 100
+            else
+                0
+    in
+    Html.div
+        [ Css.inlineStyle
+            [ Css.position Css.Value.absolute
+            , Css.left (Css.Value.pct pct)
+            , Css.top Css.Value.zero
+            , Css.width (Css.Value.px 2)
+            , Css.height (Css.Value.pct 100)
+            , Css.property "background-color" "var(--video-chapter-marker, rgba(255,255,255,0.6))"
+            , Css.borderRadius (Css.Value.px 1)
+            , Css.zIndex (Css.Value.int_ 2)
+            ]
+        , Attr.attribute "title" cue.title
+        , Attr.attribute "aria-hidden" "true"
         ]
         []
 

@@ -3,6 +3,8 @@ module Video.Config exposing
     , Theme(..)
     , ThemeVars
     , AspectRatio(..)
+    , CaptionFontSize(..)
+    , CaptionStyle
     , defaultConfig
     )
 
@@ -22,6 +24,9 @@ rebuilding the player.
 
 # Aspect Ratio
 @docs AspectRatio
+
+# Caption Style
+@docs CaptionFontSize, CaptionStyle
 
 -}
 
@@ -52,6 +57,7 @@ import Video.Source exposing (Source)
     thumbnails. When Nothing, live frame capture via
     `Media.Capture.captureFrameAt` is used instead.
   - `enableTouchGestures` — enable tap/swipe touch gestures (default True).
+  - `captionStyle` — font size and background opacity for caption cue boxes.
 
 Player events (ready, error, ended) are communicated to the parent
 application via `Video.OutMsg` returned from `Video.update`.
@@ -71,6 +77,7 @@ type alias Config =
     , keyboardShortcuts : Bool
     , thumbnailVttUrl : Maybe String
     , enableTouchGestures : Bool
+    , captionStyle : CaptionStyle
     }
 
 
@@ -144,6 +151,25 @@ type AspectRatio
     | CustomRatio Float
 
 
+{-| Font size preset for caption cue boxes. -}
+type CaptionFontSize
+    = CaptionSmall
+    | CaptionMedium
+    | CaptionLarge
+
+
+{-| Caption display style configuration.
+
+  - `fontSize` — font size preset for caption cue boxes.
+  - `backgroundOpacity` — opacity of the caption cue background, 0.0–1.0.
+
+-}
+type alias CaptionStyle =
+    { fontSize : CaptionFontSize
+    , backgroundOpacity : Float
+    }
+
+
 
 -- DEFAULT CONFIG
 
@@ -169,4 +195,5 @@ defaultConfig mediaId source =
     , keyboardShortcuts = True
     , thumbnailVttUrl = Nothing
     , enableTouchGestures = True
+    , captionStyle = { fontSize = CaptionMedium, backgroundOpacity = 0.8 }
     }

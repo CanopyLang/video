@@ -1,6 +1,7 @@
 module Video.Caption exposing
     ( Track
     , view
+    , parseVttText
     )
 
 
@@ -21,6 +22,9 @@ Cue text is taken from `Media.Track.Cue` records obtained via
 
 # View
 @docs view
+
+# Parsing
+@docs parseVttText
 
 -}
 
@@ -64,14 +68,18 @@ above the controls. Each cue is positioned according to its VTT
 When `visible` is False or the cue list is empty, the overlay is
 transparent and contains no children.
 
+The `fontSizeRem` parameter controls the base font size of cue boxes,
+derived from the `CaptionFontSize` configuration.
+
     Video.Caption.view
         { activeCues = model.activeCues
         , visible = model.activeCaptionTrack /= Nothing
+        , fontSizeRem = 1.0
         }
 
 -}
-view : { activeCues : List Media.Track.Cue, visible : Bool } -> Html.Html msg
-view { activeCues, visible } =
+view : { activeCues : List Media.Track.Cue, visible : Bool, fontSizeRem : Float } -> Html.Html msg
+view { activeCues, visible, fontSizeRem } =
     Html.div
         [ Css.inlineStyle
             [ Css.position Css.Value.absolute
@@ -84,11 +92,11 @@ view { activeCues, visible } =
             , Css.overflow Css.Value.hidden
             ]
         ]
-        (if visible then List.map cueView activeCues else [])
+        (if visible then List.map (cueView fontSizeRem) activeCues else [])
 
 
-cueView : Media.Track.Cue -> Html.Html msg
-cueView cue =
+cueView : Float -> Media.Track.Cue -> Html.Html msg
+cueView fontSizeRem cue =
     let
         settings =
             Maybe.withDefault Media.Track.defaultCueSettings cue.settings
@@ -154,7 +162,7 @@ cueView cue =
              , Css.width (Css.Value.pct widthPct)
              , Css.property "background-color" "var(--video-cue-bg, rgba(0,0,0,0.8))"
              , Css.property "color" "var(--video-cue-fg, #ffffff)"
-             , Css.fontSize (Css.Value.rem 1)
+             , Css.fontSize (Css.Value.rem fontSizeRem)
              , Css.lineHeight (Css.Value.num 1.4)
              , Css.padding2 (Css.Value.px 4) (Css.Value.px 8)
              , Css.borderRadius (Css.Value.px 2)

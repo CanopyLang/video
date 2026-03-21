@@ -14,6 +14,9 @@ When `thumbnailDataUrl` is provided (captured via
 `Media.Capture.captureFrameAt`), an actual video frame is shown.
 Otherwise a dark placeholder is displayed while the capture is in-flight.
 
+When `spriteClip` is provided, the thumbnail is rendered as a CSS
+background-position clip from a sprite sheet image instead of an `<img>`.
+
 # View
 @docs view
 
@@ -24,6 +27,7 @@ import Css
 import Css.Value
 import Html
 import Html.Attributes as Attr
+import String
 
 
 
@@ -39,17 +43,20 @@ import Html.Attributes as Attr
     only while the user is hovering over the seek bar).
   - `thumbnailDataUrl` — a data URL of the captured video frame, or
     Nothing while the capture is pending.
+  - `spriteClip` — when present, the sprite sheet clip region to render
+    using CSS background-position instead of an `<img>` tag.
 
     Video.Thumbnail.view
         { time = 45.5
         , position = 0.38
         , visible = model.seekHovering
         , thumbnailDataUrl = model.thumbnailDataUrl
+        , spriteClip = model.thumbnailSpriteClip
         }
 
 -}
-view : { time : Float, position : Float, visible : Bool, thumbnailDataUrl : Maybe String } -> Html.Html msg
-view { time, position, visible, thumbnailDataUrl } =
+view : { time : Float, position : Float, visible : Bool, thumbnailDataUrl : Maybe String, spriteClip : Maybe { x : Int, y : Int, w : Int, h : Int } } -> Html.Html msg
+view { time, position, visible, thumbnailDataUrl, spriteClip } =
     let
         thumbWidthPx =
             120.0
@@ -63,18 +70,7 @@ view { time, position, visible, thumbnailDataUrl } =
         frameContent =
             case thumbnailDataUrl of
                 Just url ->
-                    Html.img
-                        [ Attr.src url
-                        , Css.inlineStyle
-                            [ Css.width (Css.Value.px 112)
-                            , Css.height (Css.Value.px 63)
-                            , Css.borderRadius (Css.Value.px 2)
-                            , Css.marginBottom (Css.Value.px 4)
-                            , Css.display Css.Value.block
-                            , Css.property "object-fit" "cover"
-                            ]
-                        ]
-                        []
+                    spriteClipContent url spriteClip
 
                 Nothing ->
                     Html.div
@@ -114,6 +110,39 @@ view { time, position, visible, thumbnailDataUrl } =
             ]
             [ Html.text (formatTime time) ]
         ]
+
+
+spriteClipContent : String -> Maybe { x : Int, y : Int, w : Int, h : Int } -> Html.Html msg
+spriteClipContent url maybeSpriteClip =
+    case maybeSpriteClip of
+        Just clip ->
+            Html.div
+                [ Css.inlineStyle
+                    [ Css.width (Css.Value.px (toFloat clip.w))
+                    , Css.height (Css.Value.px (toFloat clip.h))
+                    , Css.property "background-image" ("url(" ++ url ++ ")")
+                    , Css.property "background-position" ("-" ++ String.fromInt clip.x ++ "px -" ++ String.fromInt clip.y ++ "px")
+                    , Css.property "background-repeat" "no-repeat"
+                    , Css.borderRadius (Css.Value.px 2)
+                    , Css.marginBottom (Css.Value.px 4)
+                    , Css.display Css.Value.block
+                    ]
+                ]
+                []
+
+        Nothing ->
+            Html.img
+                [ Attr.src url
+                , Css.inlineStyle
+                    [ Css.width (Css.Value.px 112)
+                    , Css.height (Css.Value.px 63)
+                    , Css.borderRadius (Css.Value.px 2)
+                    , Css.marginBottom (Css.Value.px 4)
+                    , Css.display Css.Value.block
+                    , Css.property "object-fit" "cover"
+                    ]
+                ]
+                []
 
 
 formatTime : Float -> String

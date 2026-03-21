@@ -2,6 +2,7 @@ module Video exposing
     ( State
     , Msg(..)
     , OutMsg(..)
+    , ActiveMenu(..)
     , QualityLevel
     , ChapterCue
     , ThumbnailSprite
@@ -30,6 +31,13 @@ module Video exposing
     , activeMenu
     , thumbnailDataUrl
     , thumbnailCapturing
+    , playbackRate
+    , volume
+    , muted
+    , activeCaptionTrack
+    , chapters
+    , thumbnailSprites
+    , parseVttTime
     )
 
 
@@ -39,14 +47,16 @@ Orchestrates HLS/DASH adaptive streaming, accessible keyboard-navigable
 controls, captions with full VTT positioning and inline markup, seek
 thumbnail preview via frame capture or sprite sheets, auto-hiding controls,
 responsive compact mode, auto-pause on scroll, live stream detection,
-chapter markers, touch gesture controls, and analytics OutMsg hooks.
+chapter markers, touch gesture controls, drag-to-scrub, mobile double-tap
+seeking, autoplay failure handling, exponential retry backoff, ARIA
+accessibility announcements, and analytics OutMsg hooks.
 
 Follows The Elm Architecture: `init` creates the initial state,
 `update` handles messages, `subscriptions` wires browser observers,
 and `view` renders the HTML.
 
 # State
-@docs State, Msg, OutMsg, QualityLevel
+@docs State, Msg, OutMsg, ActiveMenu, QualityLevel
 @docs ChapterCue, ThumbnailSprite
 @docs HlsInternalMsg, DashInternalMsg, ThumbnailInternalMsg
 
@@ -58,6 +68,8 @@ and `view` renders the HTML.
 @docs controlsVisible, lastError, remoteAvailable, hasError
 @docs isLive, isFullscreen, isPip, isCompact, activeMenu
 @docs thumbnailDataUrl, thumbnailCapturing
+@docs playbackRate, volume, muted, activeCaptionTrack, chapters, thumbnailSprites
+@docs parseVttTime
 
 -}
 
@@ -83,10 +95,11 @@ import Media.Track
 import Media.Video
 import Observer.Intersection
 import Observer.Resize
+import Process
 import String
 import Task
 import Video.Caption
-import Video.Config exposing (Config, AspectRatio(..), Theme(..))
+import Video.Config exposing (Config, AspectRatio(..), Theme(..), CaptionFontSize(..))
 import Video.Controls
 import Video.Source exposing (Source(..))
 import Video.Thumbnail
@@ -123,8 +136,9 @@ type alias StateRecord =
     , thumbnailDataUrl : Maybe String
     , thumbnailCapturing : Bool
     , thumbnailSprites : List ThumbnailSprite
+    , thumbnailSpriteClip : Maybe { x : Int, y : Int, w : Int, h : Int }
     , isCompact : Bool
-    , activeMenu : Maybe String
+    , activeMenu : Maybe ActiveMenu
     , tracksDiscovered : Bool
     , isLive : Bool
     , hasError : Bool
@@ -137,6 +151,17 @@ type alias StateRecord =
     , firstFrameEmitted : Bool
     , wasBuffering : Bool
     , lastProgressPct : Int
+    , isDraggingSeek : Bool
+    , seekBarLeft : Float
+    , seekBarWidth : Float
+    , seekBarDragStartClientX : Float
+    , seekBarDragStartTime : Float
+    , accessibilityAnnouncement : String
+    , retryCount : Int
+    , mutedByAutoplayFallback : Bool
+    , lastTapTime : Maybe Float
+    , lastTapX : Maybe Float
+    , playerWidth : Float
     }
 
 
@@ -187,6 +212,13 @@ type alias ThumbnailSprite =
     }
 
 
+{-| The currently active dropdown menu. -}
+type ActiveMenu
+    = QualityMenu
+    | SpeedMenu
+    | CaptionsMenu
+
+
 {-| All messages the player handles. -}
 type Msg
     = -- Media element events
@@ -210,12 +242,13 @@ type Msg
     | ControlsActivity
     | HideControlsDebounce (Debounce.Msg ())
       -- Dropdown menu open/close
-    | OpenMenu String
+    | OpenMenu ActiveMenu
     | CloseMenu
       -- Keyboard input
     | KeyDown String
       -- Error recovery
     | Retry
+    | DoRetry
       -- Caption track discovery and cue subscription
     | GotTrackInfo (Result Media.Error (List Media.Track.TrackInfo))
     | CueChanged
@@ -244,7 +277,16 @@ type Msg
     | GotChapterCues (Result Media.Error (List Media.Track.Cue))
       -- Touch gestures
     | TouchStart Float Float
-    | TouchEnd Float Float
+    | TouchEnd Float Float Float
+      -- Drag-to-scrub
+    | SeekDragStart Float Float Float
+    | SeekDragEnd
+    | PlayerMouseMove Float
+    | SeekTouchDragStart Float Float
+    | SeekTouchDragMove Float
+      -- Autoplay failure handling
+    | AutoplayBlocked
+    | DismissAutoplayNotice
 
 
 {-| Internal HLS messages. -}
@@ -354,6 +396,7 @@ init config =
                 , thumbnailDataUrl = Nothing
                 , thumbnailCapturing = False
                 , thumbnailSprites = []
+                , thumbnailSpriteClip = Nothing
                 , isCompact = False
                 , activeMenu = Nothing
                 , tracksDiscovered = False
@@ -368,6 +411,17 @@ init config =
                 , firstFrameEmitted = False
                 , wasBuffering = False
                 , lastProgressPct = 0
+                , isDraggingSeek = False
+                , seekBarLeft = 0.0
+                , seekBarWidth = 0.0
+                , seekBarDragStartClientX = 0.0
+                , seekBarDragStartTime = 0.0
+                , accessibilityAnnouncement = ""
+                , retryCount = 0
+                , mutedByAutoplayFallback = False
+                , lastTapTime = Nothing
+                , lastTapX = Nothing
+                , playerWidth = 0.0
                 }
 
         streamingCmd =
@@ -542,6 +596,9 @@ update config msg (State s) =
                             ]
                     else
                         Cmd.none
+
+                announcement =
+                    if isNewError then "Playback error" else s.accessibilityAnnouncement
             in
             ( State
                 { s
@@ -552,6 +609,8 @@ update config msg (State s) =
                     , firstFrameEmitted = s.firstFrameEmitted || isFirstFrame
                     , wasBuffering = nowBuffering
                     , lastProgressPct = newLastProgressPct
+                    , retryCount = if isFirstFrame then 0 else s.retryCount
+                    , accessibilityAnnouncement = announcement
                 }
             , trackCmd
             , outMsg
@@ -564,15 +623,26 @@ update config msg (State s) =
             let
                 cmd =
                     if s.mediaState.paused then
-                        Task.attempt (\_ -> GotMediaState s.mediaState)
+                        Task.attempt
+                            (\result ->
+                                case result of
+                                    Ok _ -> GotMediaState s.mediaState
+                                    Err _ -> AutoplayBlocked
+                            )
                             (Media.play config.mediaId)
                     else
                         Media.pause config.mediaId
             in
-            ( State s, cmd, Nothing )
+            ( State { s | accessibilityAnnouncement = if s.mediaState.paused then "Playing" else "Paused" }
+            , cmd
+            , Nothing
+            )
 
         SeekTo time ->
-            ( State s, Media.seek config.mediaId time, Nothing )
+            ( State { s | accessibilityAnnouncement = "Seeked to " ++ formatAnnounceTime time }
+            , Media.seek config.mediaId time
+            , Nothing
+            )
 
         SetVolume vol ->
             ( State s, Media.setVolume config.mediaId (max 0 (min 1 vol)), Nothing )
@@ -584,7 +654,10 @@ update config msg (State s) =
             )
 
         SetPlaybackRate rate ->
-            ( State { s | activeMenu = Nothing }, Media.setPlaybackRate config.mediaId rate, Nothing )
+            ( State { s | activeMenu = Nothing, accessibilityAnnouncement = "Speed " ++ String.fromFloat rate ++ "x" }
+            , Media.setPlaybackRate config.mediaId rate
+            , Nothing
+            )
 
         ToggleFullscreen ->
             let
@@ -644,7 +717,10 @@ update config msg (State s) =
                                     )
                                 |> Maybe.withDefault Cmd.none
             in
-            ( State { s | currentQualityIndex = index, activeMenu = Nothing }, cmd, Nothing )
+            ( State { s | currentQualityIndex = index, activeMenu = Nothing, accessibilityAnnouncement = "Quality changed" }
+            , cmd
+            , Nothing
+            )
 
         SetCaptionTrack maybeIndex ->
             maybeIndex
@@ -666,6 +742,7 @@ update config msg (State s) =
                 { s
                     | controlsVisible = False
                     , hideControlsDebounce = Debounce.cancel s.hideControlsDebounce
+                    , isDraggingSeek = False
                 }
             , Cmd.none
             , Nothing
@@ -688,8 +765,8 @@ update config msg (State s) =
             in
             ( State { s | hideControlsDebounce = newDebounce }, cmd, Nothing )
 
-        OpenMenu name ->
-            ( State { s | activeMenu = Just name }, Cmd.none, Nothing )
+        OpenMenu menu ->
+            ( State { s | activeMenu = Just menu }, Cmd.none, Nothing )
 
         CloseMenu ->
             ( State { s | activeMenu = Nothing }, Cmd.none, Nothing )
@@ -698,6 +775,22 @@ update config msg (State s) =
             handleKeyDown config key s
 
         Retry ->
+            if s.retryCount >= 3 then
+                ( State { s | hasError = True }
+                , Cmd.none
+                , Just (PlaybackError (Maybe.withDefault Media.NetworkError s.lastError))
+                )
+            else
+                let
+                    backoffMs =
+                        s.retryCount * 2000
+
+                    retryCmd =
+                        Task.perform (\_ -> DoRetry) (Process.sleep (toFloat backoffMs))
+                in
+                ( State { s | retryCount = s.retryCount + 1 }, retryCmd, Nothing )
+
+        DoRetry ->
             let
                 cmd =
                     case config.source of
@@ -789,7 +882,7 @@ update config msg (State s) =
             )
 
         GotPlayerWidth width ->
-            ( State { s | isCompact = width < 480 }, Cmd.none, Nothing )
+            ( State { s | isCompact = width < 480, playerWidth = width }, Cmd.none, Nothing )
 
         GotPlayerVisible isVisible ->
             let
@@ -849,16 +942,98 @@ update config msg (State s) =
                 cues =
                     Result.withDefault [] result
 
-                chapters =
+                chaptersList =
                     List.map cueToChapter cues
             in
-            ( State { s | chapters = chapters }, Cmd.none, Nothing )
+            ( State { s | chapters = chaptersList }, Cmd.none, Nothing )
 
         TouchStart x y ->
             ( State { s | touchStartX = Just x, touchStartY = Just y }, Cmd.none, Nothing )
 
-        TouchEnd x y ->
-            handleTouchEnd config x y s
+        TouchEnd x y timestamp ->
+            handleTouchEnd config x y timestamp s
+
+        SeekDragStart offsetX barLeft barWidth ->
+            let
+                time =
+                    if barWidth > 0 then
+                        offsetX / barWidth * s.mediaState.duration
+                    else
+                        s.mediaState.currentTime
+            in
+            ( State { s | isDraggingSeek = True, seekBarLeft = barLeft, seekBarWidth = barWidth }
+            , Media.seek config.mediaId time
+            , Nothing
+            )
+
+        SeekDragEnd ->
+            ( State { s | isDraggingSeek = False }, Cmd.none, Nothing )
+
+        PlayerMouseMove clientX ->
+            let
+                ( newDebounce, debounceCmd ) =
+                    Debounce.push hideControlsConfig () s.hideControlsDebounce
+
+                seekCmd =
+                    if s.isDraggingSeek && s.seekBarWidth > 0 then
+                        let
+                            relX =
+                                clientX - s.seekBarLeft
+
+                            clamped =
+                                max 0 (min s.seekBarWidth relX)
+
+                            time =
+                                clamped / s.seekBarWidth * s.mediaState.duration
+                        in
+                        Media.seek config.mediaId time
+                    else
+                        Cmd.none
+            in
+            ( State { s | controlsVisible = True, hideControlsDebounce = newDebounce }
+            , Cmd.batch [ debounceCmd, seekCmd ]
+            , Nothing
+            )
+
+        SeekTouchDragStart startClientX barWidth ->
+            ( State
+                { s
+                    | isDraggingSeek = True
+                    , seekBarWidth = barWidth
+                    , seekBarDragStartClientX = startClientX
+                    , seekBarDragStartTime = s.mediaState.currentTime
+                }
+            , Cmd.none
+            , Nothing
+            )
+
+        SeekTouchDragMove currentClientX ->
+            if not s.isDraggingSeek || s.seekBarWidth <= 0 then
+                ( State s, Cmd.none, Nothing )
+            else
+                let
+                    delta =
+                        (currentClientX - s.seekBarDragStartClientX) / s.seekBarWidth * s.mediaState.duration
+
+                    time =
+                        max 0 (min s.mediaState.duration (s.seekBarDragStartTime + delta))
+                in
+                ( State s, Media.seek config.mediaId time, Nothing )
+
+        AutoplayBlocked ->
+            ( State { s | mutedByAutoplayFallback = True }
+            , Cmd.batch
+                [ Media.setMuted config.mediaId True
+                , Task.attempt (\_ -> GotMediaState s.mediaState) (Media.play config.mediaId)
+                ]
+            , Nothing
+            )
+
+        DismissAutoplayNotice ->
+            ( State { s | mutedByAutoplayFallback = False }
+            , Media.setMuted config.mediaId False
+            , Nothing
+            )
 
 
 enableCaptionTrack : Config -> Int -> StateRecord -> ( State, Cmd Msg, Maybe OutMsg )
@@ -941,6 +1116,21 @@ disableCaptionTrack config s =
     , clearCmd
     , Nothing
     )
+
+
+cycleCaptionTrack : Config -> StateRecord -> ( State, Cmd Msg, Maybe OutMsg )
+cycleCaptionTrack config s =
+    case s.activeCaptionTrack of
+        Nothing ->
+            case List.head s.captionTrackInfos of
+                Just _ ->
+                    enableCaptionTrack config 0 s
+
+                Nothing ->
+                    ( State s, Cmd.none, Nothing )
+
+        Just _ ->
+            disableCaptionTrack config s
 
 
 handleKeyDown : Config -> String -> StateRecord -> ( State, Cmd Msg, Maybe OutMsg )
@@ -1049,11 +1239,14 @@ handleKeyDown config key s =
             , Nothing
             )
 
+        "Escape" ->
+            ( State { s | activeMenu = Nothing }, Cmd.none, Nothing )
+
         "c" ->
-            disableCaptionTrack config s
+            cycleCaptionTrack config s
 
         "C" ->
-            disableCaptionTrack config s
+            cycleCaptionTrack config s
 
         "<" ->
             ( State s
@@ -1068,6 +1261,12 @@ handleKeyDown config key s =
                 (min 2.0 (s.mediaState.playbackRate + 0.25))
             , Nothing
             )
+
+        "Home" ->
+            ( State s, Media.seek config.mediaId 0, Nothing )
+
+        "End" ->
+            ( State s, Media.seek config.mediaId s.mediaState.duration, Nothing )
 
         _ ->
             let
@@ -1093,8 +1292,8 @@ handleKeyDown config key s =
             ( State s, Maybe.withDefault Cmd.none digitSeek, Nothing )
 
 
-handleTouchEnd : Config -> Float -> Float -> StateRecord -> ( State, Cmd Msg, Maybe OutMsg )
-handleTouchEnd config x y s =
+handleTouchEnd : Config -> Float -> Float -> Float -> StateRecord -> ( State, Cmd Msg, Maybe OutMsg )
+handleTouchEnd config x y timestamp s =
     let
         cleared =
             { s | touchStartX = Nothing, touchStartY = Nothing }
@@ -1109,50 +1308,87 @@ handleTouchEnd config x y s =
                     y - startY
             in
             if abs dx < 10 && abs dy < 10 then
-                -- Tap: toggle play/pause
-                let
-                    playCmd =
-                        if s.mediaState.paused then
-                            Task.attempt (\_ -> GotMediaState s.mediaState)
-                                (Media.play config.mediaId)
-                        else
-                            Media.pause config.mediaId
-                in
-                ( State cleared, playCmd, Nothing )
-
+                handleTap config x timestamp cleared s
             else if dx < -20 then
                 -- Swipe left: seek back 10s
                 ( State cleared
                 , Media.seek config.mediaId (max 0 (s.mediaState.currentTime - 10))
                 , Nothing
                 )
-
             else if dx > 20 then
                 -- Swipe right: seek forward 10s
                 ( State cleared
                 , Media.seek config.mediaId (min s.mediaState.duration (s.mediaState.currentTime + 10))
                 , Nothing
                 )
-
             else if dy < -20 then
                 -- Swipe up: volume up
                 ( State cleared
                 , Media.setVolume config.mediaId (min 1 (s.mediaState.volume + 0.1))
                 , Nothing
                 )
-
             else if dy > 20 then
                 -- Swipe down: volume down
                 ( State cleared
                 , Media.setVolume config.mediaId (max 0 (s.mediaState.volume - 0.1))
                 , Nothing
                 )
-
             else
                 ( State cleared, Cmd.none, Nothing )
 
         _ ->
             ( State { s | touchStartX = Nothing, touchStartY = Nothing }, Cmd.none, Nothing )
+
+
+handleTap : Config -> Float -> Float -> StateRecord -> StateRecord -> ( State, Cmd Msg, Maybe OutMsg )
+handleTap config x timestamp cleared s =
+    let
+        isDoubleTap =
+            case s.lastTapTime of
+                Just prevTime ->
+                    timestamp - prevTime < 300
+
+                Nothing ->
+                    False
+
+        playCmd =
+            if s.mediaState.paused then
+                Task.attempt (\_ -> GotMediaState s.mediaState)
+                    (Media.play config.mediaId)
+            else
+                Media.pause config.mediaId
+    in
+    if isDoubleTap then
+        handleDoubleTap config x cleared s playCmd
+    else
+        -- Single tap: store for potential double-tap, toggle play
+        ( State { cleared | lastTapTime = Just timestamp, lastTapX = Just x }
+        , playCmd
+        , Nothing
+        )
+
+
+handleDoubleTap : Config -> Float -> StateRecord -> StateRecord -> Cmd Msg -> ( State, Cmd Msg, Maybe OutMsg )
+handleDoubleTap config tapX cleared s playCmd =
+    let
+        isLeft =
+            s.playerWidth > 0 && tapX < s.playerWidth * 0.35
+
+        isRight =
+            s.playerWidth > 0 && tapX > s.playerWidth * 0.65
+
+        seekCmd =
+            if isLeft then
+                Media.seek config.mediaId (max 0 (s.mediaState.currentTime - 10))
+            else if isRight then
+                Media.seek config.mediaId (min s.mediaState.duration (s.mediaState.currentTime + 10))
+            else
+                playCmd
+    in
+    ( State { cleared | lastTapTime = Nothing, lastTapX = Nothing }
+    , seekCmd
+    , Nothing
+    )
 
 
 updateHls : Config -> HlsInternalMsg -> StateRecord -> ( State, Cmd Msg, Maybe OutMsg )
@@ -1360,31 +1596,47 @@ updateThumbnail : Config -> ThumbnailInternalMsg -> StateRecord -> ( State, Cmd 
 updateThumbnail config thumbMsg s =
     case thumbMsg of
         ThumbnailHoverAt time position ->
-            let
-                shouldCapture =
-                    not s.thumbnailCapturing && List.isEmpty s.thumbnailSprites
+            case findSpriteAt time s.thumbnailSprites of
+                Just sprite ->
+                    ( State
+                        { s
+                            | seekHovering = True
+                            , thumbnailTime = time
+                            , thumbnailPosition = position
+                            , thumbnailDataUrl = Just sprite.url
+                            , thumbnailCapturing = False
+                            , thumbnailSpriteClip = Just { x = sprite.x, y = sprite.y, w = sprite.w, h = sprite.h }
+                        }
+                    , Cmd.none
+                    , Nothing
+                    )
 
-                captureCmd =
-                    if shouldCapture then
-                        Task.attempt GotThumbnailFrame
-                            (Media.Capture.captureFrameAt config.mediaId time)
-                    else
-                        Cmd.none
-            in
-            ( State
-                { s
-                    | seekHovering = True
-                    , thumbnailTime = time
-                    , thumbnailPosition = position
-                    -- True when a live capture is in-flight (no sprites); False when using sprites
-                    , thumbnailCapturing = s.thumbnailCapturing || shouldCapture
-                }
-            , captureCmd
-            , Nothing
-            )
+                Nothing ->
+                    let
+                        shouldCapture =
+                            not s.thumbnailCapturing && List.isEmpty s.thumbnailSprites
+
+                        captureCmd =
+                            if shouldCapture then
+                                Task.attempt GotThumbnailFrame
+                                    (Media.Capture.captureFrameAt config.mediaId time)
+                            else
+                                Cmd.none
+                    in
+                    ( State
+                        { s
+                            | seekHovering = True
+                            , thumbnailTime = time
+                            , thumbnailPosition = position
+                            , thumbnailCapturing = s.thumbnailCapturing || shouldCapture
+                            , thumbnailSpriteClip = Nothing
+                        }
+                    , captureCmd
+                    , Nothing
+                    )
 
         ThumbnailHoverLeave ->
-            ( State { s | seekHovering = False }, Cmd.none, Nothing )
+            ( State { s | seekHovering = False, thumbnailSpriteClip = Nothing }, Cmd.none, Nothing )
 
 
 
@@ -1433,7 +1685,7 @@ view config (State s) =
                     , ( "--video-spinner-color", "rgba(255,255,255,0.8)" )
                     , ( "--video-live-bg", "#cc0000" )
                     , ( "--video-live-fg", "#ffffff" )
-                    , ( "--video-cue-bg", "rgba(0,0,0,0.8)" )
+                    , ( "--video-cue-bg", "rgba(0,0,0," ++ String.fromFloat config.captionStyle.backgroundOpacity ++ ")" )
                     , ( "--video-cue-fg", "#ffffff" )
                     , ( "--video-thumb-bg", "rgba(0,0,0,0.85)" )
                     ]
@@ -1450,7 +1702,7 @@ view config (State s) =
                     , ( "--video-spinner-color", "rgba(0,0,0,0.6)" )
                     , ( "--video-live-bg", "#0044cc" )
                     , ( "--video-live-fg", "#ffffff" )
-                    , ( "--video-cue-bg", "rgba(255,255,255,0.85)" )
+                    , ( "--video-cue-bg", "rgba(255,255,255," ++ String.fromFloat config.captionStyle.backgroundOpacity ++ ")" )
                     , ( "--video-cue-fg", "#1a1a1a" )
                     , ( "--video-thumb-bg", "rgba(255,255,255,0.9)" )
                     ]
@@ -1494,15 +1746,19 @@ view config (State s) =
              , Css.width (Css.Value.pct 100)
              , Css.overflow Css.Value.hidden
              , Css.backgroundColor (Css.Value.hex "#000000")
-             , Css.property "outline" "none"
+             , Css.property "outline" "2px solid transparent"
+             , Css.property "outline-offset" "2px"
              ]
              ++ List.map (\( k, v ) -> Css.setVariable k v) themeVars
             )
          , Attr.id (Media.unwrapId config.mediaId ++ "-player")
          , Attr.attribute "tabindex" "0"
+         , Attr.attribute "role" "region"
+         , Attr.attribute "aria-label" "Video player"
          , Events.onMouseEnter ShowControls
          , Events.onMouseLeave HideControls
-         , Events.on "mousemove" (Decode.succeed ControlsActivity)
+         , Events.on "mousemove" (Decode.map PlayerMouseMove (Decode.field "clientX" Decode.float))
+         , Events.on "mouseup" (Decode.succeed SeekDragEnd)
          ] ++ keyboardAttrs ++ touchAttrs)
         [ -- Inject keyframe rule for the buffering spinner animation.
           Html.node "style" []
@@ -1527,15 +1783,33 @@ view config (State s) =
                 ]
             ]
             [ videoElement config s
-            , Video.Caption.view
+            , Html.lazy Video.Caption.view
                 { activeCues = s.activeCues
                 , visible = s.activeCaptionTrack /= Nothing
+                , fontSizeRem = captionFontSizeToRem config.captionStyle.fontSize
                 }
-            , bigPlayButton s
-            , bufferingSpinner s
-            , errorOverlay s
+            , Html.lazy bigPlayButton s
+            , Html.lazy bufferingSpinner s
+            , Html.lazy errorOverlay s
+            , -- Accessibility live region
+              Html.div
+                [ Attr.attribute "aria-live" "polite"
+                , Attr.attribute "aria-atomic" "true"
+                , Css.inlineStyle
+                    [ Css.position Css.Value.absolute
+                    , Css.property "clip" "rect(0 0 0 0)"
+                    , Css.width (Css.Value.px 1)
+                    , Css.height (Css.Value.px 1)
+                    , Css.overflow Css.Value.hidden
+                    ]
+                ]
+                [ Html.text s.accessibilityAnnouncement ]
+            , if s.mutedByAutoplayFallback then
+                unmuteNotice
+              else
+                Html.text ""
             , if config.showControls then
-                controlsBar config s
+                Html.lazy2 controlsBar config s
               else
                 Html.text ""
             ]
@@ -1569,7 +1843,7 @@ videoElement config s =
                     []
 
         -- Extended state decoder: captures currentTime, duration, paused,
-        -- muted, volume, playbackRate, readyState, and ended.
+        -- muted, volume, playbackRate, readyState, ended, and error.
         -- `defaultState` is bound locally because Canopy's record-update
         -- syntax does not accept module-qualified names as the base.
         defaultState =
@@ -1609,6 +1883,14 @@ videoElement config s =
                                 (Decode.at [ "target", "readyState" ] Decode.int)
                                 (Decode.at [ "target", "ended" ] Decode.bool)
                         )
+                    |> Decode.andThen
+                        (\mediaState ->
+                            Decode.map
+                                (\err -> { mediaState | error = err })
+                                (Decode.at [ "target", "error" ]
+                                    (Decode.nullable (Decode.map (\_ -> Media.NetworkError) (Decode.field "code" Decode.int)))
+                                )
+                        )
                 )
     in
     Html.node "video"
@@ -1631,7 +1913,7 @@ videoElement config s =
          , Events.on "volumechange" stateDecoder
          , Events.on "ratechange" stateDecoder
          , Events.on "progress" (Decode.succeed FetchBuffered)
-         , Events.on "waiting" (Decode.succeed (GotMediaState s.mediaState))
+         , Events.on "waiting" stateDecoder
          ] ++ posterAttr ++ srcAttrs)
         []
 
@@ -1731,13 +2013,16 @@ errorOverlay s =
         let
             errorText =
                 case s.customErrorMsg of
-                    Just msg ->
-                        msg
+                    Just msg_ ->
+                        msg_
 
                     Nothing ->
                         s.lastError
                             |> Maybe.map Media.errorToString
                             |> Maybe.withDefault "An unknown error occurred"
+
+            retryExhausted =
+                s.retryCount >= 3
         in
         Html.div
             [ Css.inlineStyle
@@ -1794,26 +2079,57 @@ errorOverlay s =
                     , Css.marginBottom (Css.Value.px 16)
                     ]
                 ]
-                [ Html.text errorText ]
-            , Html.button
-                [ Css.inlineStyle
-                    [ Css.padding2 (Css.Value.px 8) (Css.Value.px 20)
-                    , Css.backgroundColor (Css.Value.rgba 255 255 255 0.15)
-                    , Css.property "border" "1px solid rgba(255,255,255,0.3)"
-                    , Css.borderRadius (Css.Value.px 4)
-                    , Css.property "color" "var(--video-error-fg, #ffffff)"
-                    , Css.cursor Css.Value.pointer
-                    , Css.fontSize (Css.Value.rem 0.875)
+                [ Html.text (if retryExhausted then "Playback failed" else errorText) ]
+            , if retryExhausted then
+                Html.text ""
+              else
+                Html.button
+                    [ Css.inlineStyle
+                        [ Css.padding2 (Css.Value.px 8) (Css.Value.px 20)
+                        , Css.backgroundColor (Css.Value.rgba 255 255 255 0.15)
+                        , Css.property "border" "1px solid rgba(255,255,255,0.3)"
+                        , Css.borderRadius (Css.Value.px 4)
+                        , Css.property "color" "var(--video-error-fg, #ffffff)"
+                        , Css.cursor Css.Value.pointer
+                        , Css.fontSize (Css.Value.rem 0.875)
+                        ]
+                    , Attr.attribute "aria-label" "Retry playback"
+                    , Events.onClick Retry
                     ]
-                , Attr.attribute "aria-label" "Retry playback"
-                , Events.onClick Retry
-                ]
-                [ Html.text "Retry" ]
+                    [ Html.text "Retry" ]
             ]
+
+
+unmuteNotice : Html.Html Msg
+unmuteNotice =
+    Html.button
+        [ Css.inlineStyle
+            [ Css.position Css.Value.absolute
+            , Css.top (Css.Value.px 8)
+            , Css.right (Css.Value.px 8)
+            , Css.zIndex (Css.Value.int_ 25)
+            , Css.property "background-color" "rgba(0,0,0,0.7)"
+            , Css.property "color" "#ffffff"
+            , Css.property "border" "1px solid rgba(255,255,255,0.4)"
+            , Css.borderRadius (Css.Value.px 4)
+            , Css.padding2 (Css.Value.px 6) (Css.Value.px 12)
+            , Css.fontSize (Css.Value.rem 0.875)
+            , Css.cursor Css.Value.pointer
+            ]
+        , Attr.attribute "aria-label" "Unmute"
+        , Events.onClick DismissAutoplayNotice
+        ]
+        [ Html.text "Tap to unmute" ]
 
 
 controlsBar : Config -> StateRecord -> Html.Html Msg
 controlsBar config s =
+    let
+        currentChapterTitle =
+            activeChapterAt s.mediaState.currentTime s.chapters
+                |> Maybe.map .title
+                |> Maybe.withDefault ""
+    in
     Html.div
         [ Css.inlineStyle
             [ Css.position Css.Value.absolute
@@ -1837,7 +2153,13 @@ controlsBar config s =
             , position = s.thumbnailPosition
             , visible = s.seekHovering
             , thumbnailDataUrl = s.thumbnailDataUrl
+            , spriteClip = s.thumbnailSpriteClip
             }
+        , -- Chapter title badge
+          if currentChapterTitle /= "" then
+            chapterTitleBadge currentChapterTitle
+          else
+            Html.text ""
         , -- Live badge + seek bar row
           Html.div
             [ Css.inlineStyle
@@ -1854,6 +2176,11 @@ controlsBar config s =
                     , onThumbnailHover =
                         Just (\t p -> ThumbnailMsg (ThumbnailHoverAt t p))
                     , onThumbnailLeave = Just (ThumbnailMsg ThumbnailHoverLeave)
+                    , onSeekDragStart = SeekDragStart
+                    , onSeekDragEnd = SeekDragEnd
+                    , onSeekTouchDragStart = SeekTouchDragStart
+                    , onSeekTouchDragMove = SeekTouchDragMove
+                    , onNoOp = ControlsActivity
                     , currentTime = s.mediaState.currentTime
                     , duration = s.mediaState.duration
                     , buffered =
@@ -1861,6 +2188,7 @@ controlsBar config s =
                             (\r -> { start = r.start, end = r.end })
                             s.mediaState.buffered
                     , showThumbnail = True
+                    , chapters = List.map (\c -> { startTime = c.startTime, endTime = c.endTime, title = c.title }) s.chapters
                     }
               else
                 Html.text ""
@@ -1895,9 +2223,9 @@ controlsBar config s =
             , if not (List.isEmpty s.availableQualities) && not s.isCompact then
                 Video.Controls.qualityMenu
                     { onSelect = SetQuality
-                    , onOpen = OpenMenu "quality"
+                    , onOpen = OpenMenu QualityMenu
                     , onClose = CloseMenu
-                    , isOpen = s.activeMenu == Just "quality"
+                    , isOpen = s.activeMenu == Just QualityMenu
                     , levels =
                         List.map
                             (\q ->
@@ -1914,9 +2242,9 @@ controlsBar config s =
             , if not s.isCompact then
                 Video.Controls.speedMenu
                     { onSelect = SetPlaybackRate
-                    , onOpen = OpenMenu "speed"
+                    , onOpen = OpenMenu SpeedMenu
                     , onClose = CloseMenu
-                    , isOpen = s.activeMenu == Just "speed"
+                    , isOpen = s.activeMenu == Just SpeedMenu
                     , currentRate = s.mediaState.playbackRate
                     }
               else
@@ -1924,9 +2252,9 @@ controlsBar config s =
             , if not (List.isEmpty s.captionTracks) then
                 Video.Controls.captionsMenu
                     { onSelect = SetCaptionTrack
-                    , onOpen = OpenMenu "captions"
+                    , onOpen = OpenMenu CaptionsMenu
                     , onClose = CloseMenu
-                    , isOpen = s.activeMenu == Just "captions"
+                    , isOpen = s.activeMenu == Just CaptionsMenu
                     , tracks = s.captionTracks
                     , activeTrack = s.activeCaptionTrack
                     }
@@ -1949,6 +2277,24 @@ controlsBar config s =
                 }
             ]
         ]
+
+
+chapterTitleBadge : String -> Html.Html msg
+chapterTitleBadge title =
+    Html.div
+        [ Css.inlineStyle
+            [ Css.position Css.Value.absolute
+            , Css.bottom (Css.Value.px 56)
+            , Css.left (Css.Value.px 8)
+            , Css.property "background-color" "rgba(0,0,0,0.6)"
+            , Css.property "color" "#ffffff"
+            , Css.fontSize (Css.Value.rem 0.8125)
+            , Css.padding2 (Css.Value.px 2) (Css.Value.px 8)
+            , Css.borderRadius (Css.Value.px 2)
+            , Css.pointerEvents Css.Value.none
+            ]
+        ]
+        [ Html.text title ]
 
 
 liveBadge : Html.Html msg
@@ -2038,8 +2384,14 @@ cueToChapter cue =
 
 
 activeChapterAt : Float -> List ChapterCue -> Maybe ChapterCue
-activeChapterAt t chapters =
-    List.filter (\c -> c.startTime <= t && t < c.endTime) chapters
+activeChapterAt t chaptersList =
+    List.filter (\c -> c.startTime <= t && t < c.endTime) chaptersList
+        |> List.head
+
+
+findSpriteAt : Float -> List ThumbnailSprite -> Maybe ThumbnailSprite
+findSpriteAt t sprites =
+    List.filter (\sp -> sp.startTime <= t && t < sp.endTime) sprites
         |> List.head
 
 
@@ -2052,9 +2404,10 @@ touchStartDecoder =
 
 touchEndDecoder : Decode.Decoder Msg
 touchEndDecoder =
-    Decode.map2 TouchEnd
+    Decode.map3 TouchEnd
         (Decode.at [ "changedTouches", "0", "clientX" ] Decode.float)
         (Decode.at [ "changedTouches", "0", "clientY" ] Decode.float)
+        (Decode.field "timeStamp" Decode.float)
 
 
 {-| Parse a WebVTT sprite sheet into a list of ThumbnailSprite records.
@@ -2139,6 +2492,11 @@ parseSpriteImage startTime endTime imageLine =
             Nothing
 
 
+{-| Parse a VTT time string (HH:MM:SS.mmm or MM:SS.mmm) into seconds.
+
+Returns 0.0 for malformed input.
+
+-}
 parseVttTime : String -> Float
 parseVttTime timeStr =
     let
@@ -2168,6 +2526,46 @@ parseVttTime timeStr =
 
         _ ->
             0
+
+
+formatAnnounceTime : Float -> String
+formatAnnounceTime seconds =
+    let
+        totalSecs =
+            floor (max 0 seconds)
+
+        h =
+            totalSecs // 3600
+
+        m =
+            (totalSecs - h * 3600) // 60
+
+        sec =
+            totalSecs - h * 3600 - m * 60
+
+        pad n =
+            if n < 10 then
+                "0" ++ String.fromInt n
+            else
+                String.fromInt n
+    in
+    if h > 0 then
+        String.fromInt h ++ ":" ++ pad m ++ ":" ++ pad sec
+    else
+        pad m ++ ":" ++ pad sec
+
+
+captionFontSizeToRem : Video.Config.CaptionFontSize -> Float
+captionFontSizeToRem fs =
+    case fs of
+        Video.Config.CaptionSmall ->
+            0.75
+
+        Video.Config.CaptionMedium ->
+            1.0
+
+        Video.Config.CaptionLarge ->
+            1.4
 
 
 
@@ -2273,8 +2671,8 @@ isCompact (State s) =
     s.isCompact
 
 
-{-| The currently open dropdown menu name, or Nothing when all menus are closed. -}
-activeMenu : State -> Maybe String
+{-| The currently open dropdown menu, or Nothing when all menus are closed. -}
+activeMenu : State -> Maybe ActiveMenu
 activeMenu (State s) =
     s.activeMenu
 
@@ -2290,3 +2688,39 @@ thumbnailDataUrl (State s) =
 thumbnailCapturing : State -> Bool
 thumbnailCapturing (State s) =
     s.thumbnailCapturing
+
+
+{-| Current playback speed as a multiplier (e.g. 1.0 normal, 2.0 double). -}
+playbackRate : State -> Float
+playbackRate (State s) =
+    s.mediaState.playbackRate
+
+
+{-| Current volume level, 0.0-1.0, regardless of mute state. -}
+volume : State -> Float
+volume (State s) =
+    s.mediaState.volume
+
+
+{-| Whether audio is currently muted. -}
+muted : State -> Bool
+muted (State s) =
+    s.mediaState.muted
+
+
+{-| The index of the currently active caption track, or Nothing when captions are off. -}
+activeCaptionTrack : State -> Maybe Int
+activeCaptionTrack (State s) =
+    s.activeCaptionTrack
+
+
+{-| All chapter cues extracted from the chapters text track. -}
+chapters : State -> List ChapterCue
+chapters (State s) =
+    s.chapters
+
+
+{-| All parsed thumbnail sprites from the VTT sprite sheet. -}
+thumbnailSprites : State -> List ThumbnailSprite
+thumbnailSprites (State s) =
+    s.thumbnailSprites
