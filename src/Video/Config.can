@@ -1,0 +1,145 @@
+module Video.Config exposing
+    ( Config
+    , Theme(..)
+    , ThemeVars
+    , AspectRatio(..)
+    , defaultConfig
+    )
+
+
+{-| Player configuration for `canopy/video`.
+
+All player behaviour is controlled through a `Config` record passed
+to `Video.init`, `Video.update`, and `Video.view`. Keeping Config
+separate from State allows the parent to change configuration without
+rebuilding the player.
+
+# Configuration
+@docs Config, defaultConfig
+
+# Theme
+@docs Theme, ThemeVars
+
+# Aspect Ratio
+@docs AspectRatio
+
+-}
+
+
+import Media
+import Video.Source exposing (Source)
+
+
+
+-- CONFIG
+
+
+{-| Complete player configuration.
+
+  - `source` — the video source (plain URL, HLS, or DASH).
+  - `mediaId` — the DOM element ID used to find the `<video>` element.
+  - `autoplay` — start playing when the player is ready (requires muted
+    or a prior user gesture; browsers block unmuted autoplay).
+  - `muted` — start with audio muted.
+  - `loop` — restart from the beginning when playback ends.
+  - `poster` — URL of a poster image shown before playback starts.
+  - `preload` — browser preload hint.
+  - `theme` — colour theme for the controls.
+  - `aspectRatio` — maintain a fixed aspect ratio container.
+  - `showControls` — whether to show the built-in control bar.
+  - `keyboardShortcuts` — enable Space/arrows/etc. keyboard shortcuts.
+
+Player events (ready, error, ended) are communicated to the parent
+application via `Video.OutMsg` returned from `Video.update`.
+
+-}
+type alias Config =
+    { source : Source
+    , mediaId : Media.MediaId
+    , autoplay : Bool
+    , muted : Bool
+    , loop : Bool
+    , poster : Maybe String
+    , preload : Media.Preload
+    , theme : Theme
+    , aspectRatio : AspectRatio
+    , showControls : Bool
+    , keyboardShortcuts : Bool
+    }
+
+
+{-| Colour theme for the player controls.
+
+  - `Light` — light controls for use on dark video content (default).
+  - `Dark` — dark controls for use on light content.
+  - `Custom` — fully customisable via CSS custom-property values.
+
+-}
+type Theme
+    = Light
+    | Dark
+    | Custom ThemeVars
+
+
+{-| CSS custom-property values for a custom theme.
+
+All values are CSS colour strings (hex, rgb, rgba, named colours, etc.).
+
+  - `controlsBg` — gradient background behind the controls bar.
+  - `controlsFg` — icon and text colour within the controls bar.
+  - `progressFill` — playback-progress fill colour on the seek bar.
+  - `progressThumb` — seek bar scrubber thumb colour.
+  - `loadedFill` — buffered-range fill colour on the seek bar.
+
+-}
+type alias ThemeVars =
+    { controlsBg : String
+    , controlsFg : String
+    , progressFill : String
+    , progressThumb : String
+    , loadedFill : String
+    }
+
+
+{-| Aspect ratio constraint for the player container.
+
+The player maintains this ratio by setting `padding-top` on the
+container, allowing it to be responsive without JavaScript layout.
+
+  - `Ratio16x9` — standard widescreen (default).
+  - `Ratio4x3` — classic TV ratio.
+  - `Ratio21x9` — cinematic widescreen.
+  - `CustomRatio f` — arbitrary ratio as a decimal (e.g. `1.0` for square).
+
+-}
+type AspectRatio
+    = Ratio16x9
+    | Ratio4x3
+    | Ratio21x9
+    | CustomRatio Float
+
+
+
+-- DEFAULT CONFIG
+
+
+{-| Default configuration for a 16:9 player with Light theme and no
+autoplay. Requires a `MediaId` and a `Source`.
+
+    Video.Config.defaultConfig (Media.id "my-video") (Video.Source.hls manifestUrl)
+
+-}
+defaultConfig : Media.MediaId -> Source -> Config
+defaultConfig mediaId source =
+    { source = source
+    , mediaId = mediaId
+    , autoplay = False
+    , muted = False
+    , loop = False
+    , poster = Nothing
+    , preload = Media.PreloadMetadata
+    , theme = Light
+    , aspectRatio = Ratio16x9
+    , showControls = True
+    , keyboardShortcuts = True
+    }

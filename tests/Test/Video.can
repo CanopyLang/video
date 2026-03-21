@@ -1,0 +1,1121 @@
+module Test.Video exposing (main)
+
+
+{-| Tests for `canopy/video`.
+
+Covers state initialisation, message handling, accessor correctness,
+and type-level verification for all public types.
+
+-}
+
+
+import Basics exposing (..)
+import Expect
+import Media
+import Media.Track
+import Test exposing (Test, describe, test)
+import Video
+import Video.Caption
+import Video.Config exposing (AspectRatio(..), Theme(..))
+import Video.Source
+
+
+main : Test
+main =
+    suite
+
+
+suite : Test
+suite =
+    describe "Video"
+        [ qualityLevelTests
+        , initTests
+        , msgTests
+        , newMsgTests
+        , outMsgTests
+        , accessorTests
+        , sourceTests
+        , configTests
+        , captionTrackTests
+        , hlsInternalMsgTests
+        , dashInternalMsgTests
+        , thumbnailInternalMsgTests
+        , subscriptionsTests
+        ]
+
+
+
+-- QUALITY LEVEL
+
+
+qualityLevelTests : Test
+qualityLevelTests =
+    describe "QualityLevel"
+        [ test "fields are accessible" <|
+            \_ ->
+                let
+                    q : Video.QualityLevel
+                    q =
+                        { index = 2
+                        , label = "1080p"
+                        , bitrate = 5000000
+                        , width = 1920
+                        , height = 1080
+                        }
+                in
+                Expect.all
+                    [ \_ -> Expect.equal 2 q.index
+                    , \_ -> Expect.equal "1080p" q.label
+                    , \_ -> Expect.equal 5000000 q.bitrate
+                    , \_ -> Expect.equal 1920 q.width
+                    , \_ -> Expect.equal 1080 q.height
+                    ]
+                    ()
+
+        , test "currentQuality returns Nothing when index is -1 (auto)" <|
+            \_ ->
+                let
+                    cfg =
+                        Video.Config.defaultConfig
+                            (Media.id "q")
+                            (Video.Source.plain "https://example.com/v.mp4")
+
+                    ( state, _ ) =
+                        Video.init cfg
+                in
+                Expect.equal Nothing (Video.currentQuality state)
+        ]
+
+
+
+-- INIT
+
+
+initTests : Test
+initTests =
+    describe "init"
+        [ test "plain source produces no init command" <|
+            \_ ->
+                let
+                    cfg =
+                        Video.Config.defaultConfig
+                            (Media.id "test-video")
+                            (Video.Source.plain "https://example.com/video.mp4")
+
+                    ( state, _ ) =
+                        Video.init cfg
+                in
+                Expect.equal 0.0 (Video.currentTime state)
+
+        , test "initial state has no quality levels" <|
+            \_ ->
+                let
+                    cfg =
+                        Video.Config.defaultConfig
+                            (Media.id "test-video")
+                            (Video.Source.plain "https://example.com/video.mp4")
+
+                    ( state, _ ) =
+                        Video.init cfg
+                in
+                Expect.equal [] (Video.availableQualities state)
+
+        , test "initial current quality is Nothing" <|
+            \_ ->
+                let
+                    cfg =
+                        Video.Config.defaultConfig
+                            (Media.id "test-video")
+                            (Video.Source.plain "https://example.com/video.mp4")
+
+                    ( state, _ ) =
+                        Video.init cfg
+                in
+                Expect.equal Nothing (Video.currentQuality state)
+
+        , test "initial caption tracks list is empty" <|
+            \_ ->
+                let
+                    cfg =
+                        Video.Config.defaultConfig
+                            (Media.id "test-video")
+                            (Video.Source.plain "https://example.com/video.mp4")
+
+                    ( state, _ ) =
+                        Video.init cfg
+                in
+                Expect.equal [] (Video.captionTracks state)
+
+        , test "initial paused is True (media not yet started)" <|
+            \_ ->
+                let
+                    cfg =
+                        Video.Config.defaultConfig
+                            (Media.id "test-video")
+                            (Video.Source.plain "https://example.com/video.mp4")
+
+                    ( state, _ ) =
+                        Video.init cfg
+                in
+                Expect.equal True (Video.paused state)
+
+        , test "initial duration is 0" <|
+            \_ ->
+                let
+                    cfg =
+                        Video.Config.defaultConfig
+                            (Media.id "test-video")
+                            (Video.Source.plain "https://example.com/video.mp4")
+
+                    ( state, _ ) =
+                        Video.init cfg
+                in
+                Expect.equal 0.0 (Video.duration state)
+
+        , test "initial buffered list is empty" <|
+            \_ ->
+                let
+                    cfg =
+                        Video.Config.defaultConfig
+                            (Media.id "test-video")
+                            (Video.Source.plain "https://example.com/video.mp4")
+
+                    ( state, _ ) =
+                        Video.init cfg
+                in
+                Expect.equal [] (Video.buffered state)
+        ]
+
+
+
+-- MSG ROUND-TRIPS
+
+
+msgTests : Test
+msgTests =
+    describe "Msg constructors"
+        [ test "SeekTo carries the time value" <|
+            \_ ->
+                let
+                    msg : Video.Msg
+                    msg = Video.SeekTo 45.5
+                in
+                case msg of
+                    Video.SeekTo t ->
+                        Expect.equal 45.5 t
+
+                    _ ->
+                        Expect.fail "Expected SeekTo"
+
+        , test "SetVolume carries the volume value" <|
+            \_ ->
+                let
+                    msg : Video.Msg
+                    msg = Video.SetVolume 0.75
+                in
+                case msg of
+                    Video.SetVolume v ->
+                        Expect.equal 0.75 v
+
+                    _ ->
+                        Expect.fail "Expected SetVolume"
+
+        , test "SetPlaybackRate carries the rate" <|
+            \_ ->
+                let
+                    msg : Video.Msg
+                    msg = Video.SetPlaybackRate 1.5
+                in
+                case msg of
+                    Video.SetPlaybackRate r ->
+                        Expect.equal 1.5 r
+
+                    _ ->
+                        Expect.fail "Expected SetPlaybackRate"
+
+        , test "SetQuality carries the level index" <|
+            \_ ->
+                let
+                    msg : Video.Msg
+                    msg = Video.SetQuality 2
+                in
+                case msg of
+                    Video.SetQuality i ->
+                        Expect.equal 2 i
+
+                    _ ->
+                        Expect.fail "Expected SetQuality"
+
+        , test "SetQuality -1 means auto" <|
+            \_ ->
+                let
+                    msg : Video.Msg
+                    msg = Video.SetQuality -1
+                in
+                case msg of
+                    Video.SetQuality i ->
+                        Expect.equal -1 i
+
+                    _ ->
+                        Expect.fail "Expected SetQuality"
+
+        , test "SetCaptionTrack Nothing disables captions" <|
+            \_ ->
+                let
+                    msg : Video.Msg
+                    msg = Video.SetCaptionTrack Nothing
+                in
+                case msg of
+                    Video.SetCaptionTrack track ->
+                        Expect.equal Nothing track
+
+                    _ ->
+                        Expect.fail "Expected SetCaptionTrack"
+
+        , test "SetCaptionTrack Just enables a track" <|
+            \_ ->
+                let
+                    msg : Video.Msg
+                    msg = Video.SetCaptionTrack (Just 0)
+                in
+                case msg of
+                    Video.SetCaptionTrack track ->
+                        Expect.equal (Just 0) track
+
+                    _ ->
+                        Expect.fail "Expected SetCaptionTrack"
+
+        , test "KeyDown carries the key string" <|
+            \_ ->
+                let
+                    msg : Video.Msg
+                    msg = Video.KeyDown "ArrowLeft"
+                in
+                case msg of
+                    Video.KeyDown k ->
+                        Expect.equal "ArrowLeft" k
+
+                    _ ->
+                        Expect.fail "Expected KeyDown"
+        ]
+
+
+
+-- NEW MSG CONSTRUCTORS (added in production-readiness overhaul)
+
+
+newMsgTests : Test
+newMsgTests =
+    describe "New Msg constructors"
+        [ test "Retry is distinct from other unit-like variants" <|
+            \_ ->
+                let
+                    msg : Video.Msg
+                    msg = Video.Retry
+                in
+                Expect.notEqual msg Video.CueChanged
+
+        , test "ToggleRemotePlayback is distinct from Retry" <|
+            \_ ->
+                let
+                    msg : Video.Msg
+                    msg = Video.ToggleRemotePlayback
+                in
+                Expect.notEqual msg Video.Retry
+
+        , test "CueChanged is distinct from FetchBuffered" <|
+            \_ ->
+                let
+                    msg : Video.Msg
+                    msg = Video.CueChanged
+                in
+                Expect.notEqual msg Video.FetchBuffered
+
+        , test "FetchBuffered is distinct from CueChanged" <|
+            \_ ->
+                let
+                    msg : Video.Msg
+                    msg = Video.FetchBuffered
+                in
+                Expect.notEqual msg Video.CueChanged
+
+        , test "GotPlayerWidth carries the width" <|
+            \_ ->
+                let
+                    msg : Video.Msg
+                    msg = Video.GotPlayerWidth 640.0
+                in
+                case msg of
+                    Video.GotPlayerWidth w ->
+                        Expect.equal 640.0 w
+
+                    _ ->
+                        Expect.fail "Expected GotPlayerWidth"
+
+        , test "GotPlayerWidth compact threshold is below 480" <|
+            \_ ->
+                let
+                    msg : Video.Msg
+                    msg = Video.GotPlayerWidth 320.0
+                in
+                case msg of
+                    Video.GotPlayerWidth w ->
+                        Expect.equal True (w < 480)
+
+                    _ ->
+                        Expect.fail "Expected GotPlayerWidth"
+
+        , test "GotPlayerVisible carries False" <|
+            \_ ->
+                let
+                    msg : Video.Msg
+                    msg = Video.GotPlayerVisible False
+                in
+                case msg of
+                    Video.GotPlayerVisible v ->
+                        Expect.equal False v
+
+                    _ ->
+                        Expect.fail "Expected GotPlayerVisible"
+
+        , test "GotPlayerVisible carries True" <|
+            \_ ->
+                let
+                    msg : Video.Msg
+                    msg = Video.GotPlayerVisible True
+                in
+                case msg of
+                    Video.GotPlayerVisible v ->
+                        Expect.equal True v
+
+                    _ ->
+                        Expect.fail "Expected GotPlayerVisible"
+
+        , test "GotIsLive carries True for live streams" <|
+            \_ ->
+                let
+                    msg : Video.Msg
+                    msg = Video.GotIsLive True
+                in
+                case msg of
+                    Video.GotIsLive live ->
+                        Expect.equal True live
+
+                    _ ->
+                        Expect.fail "Expected GotIsLive"
+
+        , test "GotIsLive carries False for VOD" <|
+            \_ ->
+                let
+                    msg : Video.Msg
+                    msg = Video.GotIsLive False
+                in
+                case msg of
+                    Video.GotIsLive live ->
+                        Expect.equal False live
+
+                    _ ->
+                        Expect.fail "Expected GotIsLive"
+
+        , test "GotTrackInfo Ok carries an empty track list" <|
+            \_ ->
+                let
+                    msg : Video.Msg
+                    msg = Video.GotTrackInfo (Ok [])
+                in
+                case msg of
+                    Video.GotTrackInfo (Ok tracks) ->
+                        Expect.equal 0 (List.length tracks)
+
+                    _ ->
+                        Expect.fail "Expected GotTrackInfo Ok"
+
+        , test "GotTrackInfo Err carries the error" <|
+            \_ ->
+                let
+                    msg : Video.Msg
+                    msg = Video.GotTrackInfo (Err Media.NetworkError)
+                in
+                case msg of
+                    Video.GotTrackInfo (Err e) ->
+                        Expect.equal Media.NetworkError e
+
+                    _ ->
+                        Expect.fail "Expected GotTrackInfo Err"
+
+        , test "GotBuffered Ok carries the buffered ranges" <|
+            \_ ->
+                let
+                    ranges =
+                        [ { start = 0.0, end = 30.0 }
+                        , { start = 35.0, end = 60.0 }
+                        ]
+
+                    msg : Video.Msg
+                    msg = Video.GotBuffered (Ok ranges)
+                in
+                case msg of
+                    Video.GotBuffered (Ok rs) ->
+                        Expect.equal 2 (List.length rs)
+
+                    _ ->
+                        Expect.fail "Expected GotBuffered Ok"
+
+        , test "GotBuffered Err carries the error" <|
+            \_ ->
+                let
+                    msg : Video.Msg
+                    msg = Video.GotBuffered (Err Media.NetworkError)
+                in
+                case msg of
+                    Video.GotBuffered (Err e) ->
+                        Expect.equal Media.NetworkError e
+
+                    _ ->
+                        Expect.fail "Expected GotBuffered Err"
+
+        , test "OpenMenu carries the menu name" <|
+            \_ ->
+                let
+                    msg : Video.Msg
+                    msg = Video.OpenMenu "quality"
+                in
+                case msg of
+                    Video.OpenMenu name ->
+                        Expect.equal "quality" name
+
+                    _ ->
+                        Expect.fail "Expected OpenMenu"
+
+        , test "OpenMenu speed carries the speed name" <|
+            \_ ->
+                let
+                    msg : Video.Msg
+                    msg = Video.OpenMenu "speed"
+                in
+                case msg of
+                    Video.OpenMenu name ->
+                        Expect.equal "speed" name
+
+                    _ ->
+                        Expect.fail "Expected OpenMenu speed"
+
+        , test "CloseMenu does not match OpenMenu" <|
+            \_ ->
+                let
+                    isOpenMenu : Video.Msg -> Bool
+                    isOpenMenu m =
+                        case m of
+                            Video.OpenMenu _ -> True
+                            _ -> False
+                in
+                Expect.equal False (isOpenMenu Video.CloseMenu)
+
+        , test "HideControlsDebounce does not match other unit-like Msg constructors" <|
+            \_ ->
+                let
+                    isHideControlsDebounce : Video.Msg -> Bool
+                    isHideControlsDebounce m =
+                        case m of
+                            Video.HideControlsDebounce _ ->
+                                True
+
+                            _ ->
+                                False
+                in
+                Expect.all
+                    [ \_ -> Expect.equal False (isHideControlsDebounce Video.Retry)
+                    , \_ -> Expect.equal False (isHideControlsDebounce Video.CueChanged)
+                    , \_ -> Expect.equal False (isHideControlsDebounce Video.FetchBuffered)
+                    , \_ -> Expect.equal False (isHideControlsDebounce Video.ToggleRemotePlayback)
+                    ]
+                    ()
+        ]
+
+
+
+-- OUT MSG
+
+
+outMsgTests : Test
+outMsgTests =
+    describe "OutMsg constructors"
+        [ test "Ready is distinct from Ended" <|
+            \_ ->
+                let
+                    out : Video.OutMsg
+                    out = Video.Ready
+                in
+                Expect.notEqual out Video.Ended
+
+        , test "PlaybackError carries the error" <|
+            \_ ->
+                let
+                    out : Video.OutMsg
+                    out = Video.PlaybackError Media.NetworkError
+                in
+                case out of
+                    Video.PlaybackError e ->
+                        Expect.equal Media.NetworkError e
+
+                    _ ->
+                        Expect.fail "Expected PlaybackError"
+
+        , test "QualityLevelsLoaded carries the level list" <|
+            \_ ->
+                let
+                    levels =
+                        [ { index = 0, label = "360p", bitrate = 500000, width = 640, height = 360 } ]
+
+                    out : Video.OutMsg
+                    out = Video.QualityLevelsLoaded levels
+                in
+                case out of
+                    Video.QualityLevelsLoaded ls ->
+                        Expect.equal 1 (List.length ls)
+
+                    _ ->
+                        Expect.fail "Expected QualityLevelsLoaded"
+
+        , test "Ended is distinct from Ready" <|
+            \_ ->
+                let
+                    out : Video.OutMsg
+                    out = Video.Ended
+                in
+                Expect.notEqual out Video.Ready
+
+        , test "RemotePlaybackRequested is distinct from Ready" <|
+            \_ ->
+                let
+                    out : Video.OutMsg
+                    out = Video.RemotePlaybackRequested
+                in
+                Expect.notEqual out Video.Ready
+
+        , test "RemotePlaybackRequested is distinct from Ended" <|
+            \_ ->
+                let
+                    out : Video.OutMsg
+                    out = Video.RemotePlaybackRequested
+                in
+                Expect.notEqual out Video.Ended
+        ]
+
+
+
+-- ACCESSORS
+
+
+accessorTests : Test
+accessorTests =
+    describe "State accessors"
+        [ test "currentTime is 0 at init" <|
+            \_ ->
+                let
+                    cfg =
+                        Video.Config.defaultConfig
+                            (Media.id "v")
+                            (Video.Source.plain "https://example.com/v.mp4")
+
+                    ( state, _ ) = Video.init cfg
+                in
+                Expect.equal 0.0 (Video.currentTime state)
+
+        , test "duration is 0 at init" <|
+            \_ ->
+                let
+                    cfg =
+                        Video.Config.defaultConfig
+                            (Media.id "v")
+                            (Video.Source.plain "https://example.com/v.mp4")
+
+                    ( state, _ ) = Video.init cfg
+                in
+                Expect.equal 0.0 (Video.duration state)
+
+        , test "paused is True at init" <|
+            \_ ->
+                let
+                    cfg =
+                        Video.Config.defaultConfig
+                            (Media.id "v")
+                            (Video.Source.plain "https://example.com/v.mp4")
+
+                    ( state, _ ) = Video.init cfg
+                in
+                Expect.equal True (Video.paused state)
+
+        , test "availableQualities is empty at init" <|
+            \_ ->
+                let
+                    cfg =
+                        Video.Config.defaultConfig
+                            (Media.id "v")
+                            (Video.Source.plain "https://example.com/v.mp4")
+
+                    ( state, _ ) = Video.init cfg
+                in
+                Expect.equal [] (Video.availableQualities state)
+
+        , test "currentQuality is Nothing at init" <|
+            \_ ->
+                let
+                    cfg =
+                        Video.Config.defaultConfig
+                            (Media.id "v")
+                            (Video.Source.plain "https://example.com/v.mp4")
+
+                    ( state, _ ) = Video.init cfg
+                in
+                Expect.equal Nothing (Video.currentQuality state)
+
+        , test "captionTracks is empty at init" <|
+            \_ ->
+                let
+                    cfg =
+                        Video.Config.defaultConfig
+                            (Media.id "v")
+                            (Video.Source.plain "https://example.com/v.mp4")
+
+                    ( state, _ ) = Video.init cfg
+                in
+                Expect.equal [] (Video.captionTracks state)
+
+        , test "buffered is empty at init" <|
+            \_ ->
+                let
+                    cfg =
+                        Video.Config.defaultConfig
+                            (Media.id "v")
+                            (Video.Source.plain "https://example.com/v.mp4")
+
+                    ( state, _ ) = Video.init cfg
+                in
+                Expect.equal [] (Video.buffered state)
+        ]
+
+
+
+-- SOURCE
+
+
+sourceTests : Test
+sourceTests =
+    describe "Video.Source"
+        [ test "plain source with no MIME" <|
+            \_ ->
+                let
+                    src = Video.Source.plain "https://example.com/v.mp4"
+                in
+                case src of
+                    Video.Source.Plain url Nothing ->
+                        Expect.equal "https://example.com/v.mp4" url
+
+                    _ ->
+                        Expect.fail "Expected Plain with no MIME"
+
+        , test "plain source with MIME type" <|
+            \_ ->
+                let
+                    src = Video.Source.plainWithType "https://example.com/v.mp4" "video/mp4"
+                in
+                case src of
+                    Video.Source.Plain url (Just mime) ->
+                        Expect.all
+                            [ \_ -> Expect.equal "https://example.com/v.mp4" url
+                            , \_ -> Expect.equal "video/mp4" mime
+                            ]
+                            ()
+
+                    _ ->
+                        Expect.fail "Expected Plain with MIME"
+
+        , test "hls source carries the manifest URL" <|
+            \_ ->
+                let
+                    src = Video.Source.hls "https://example.com/stream.m3u8"
+                in
+                case src of
+                    Video.Source.Hls url ->
+                        Expect.equal "https://example.com/stream.m3u8" url
+
+                    _ ->
+                        Expect.fail "Expected Hls"
+
+        , test "dash source without DRM" <|
+            \_ ->
+                let
+                    src = Video.Source.dash "https://example.com/stream.mpd"
+                in
+                case src of
+                    Video.Source.Dash url Nothing ->
+                        Expect.equal "https://example.com/stream.mpd" url
+
+                    _ ->
+                        Expect.fail "Expected Dash without protection"
+
+        , test "dash source with DRM protection data" <|
+            \_ ->
+                let
+                    src =
+                        Video.Source.dashProtected
+                            "https://example.com/stream.mpd"
+                            { keySystem = "com.widevine.alpha"
+                            , licenseServer = "https://license.example.com"
+                            }
+                in
+                case src of
+                    Video.Source.Dash _ (Just pd) ->
+                        Expect.equal "com.widevine.alpha" pd.keySystem
+
+                    _ ->
+                        Expect.fail "Expected Dash with protection"
+        ]
+
+
+
+-- CONFIG
+
+
+configTests : Test
+configTests =
+    describe "Video.Config"
+        [ test "defaultConfig has autoplay disabled" <|
+            \_ ->
+                let
+                    cfg =
+                        Video.Config.defaultConfig
+                            (Media.id "v")
+                            (Video.Source.plain "https://example.com/v.mp4")
+                in
+                Expect.equal False cfg.autoplay
+
+        , test "defaultConfig has muted disabled" <|
+            \_ ->
+                let
+                    cfg =
+                        Video.Config.defaultConfig
+                            (Media.id "v")
+                            (Video.Source.plain "https://example.com/v.mp4")
+                in
+                Expect.equal False cfg.muted
+
+        , test "defaultConfig has loop disabled" <|
+            \_ ->
+                let
+                    cfg =
+                        Video.Config.defaultConfig
+                            (Media.id "v")
+                            (Video.Source.plain "https://example.com/v.mp4")
+                in
+                Expect.equal False cfg.loop
+
+        , test "defaultConfig uses Light theme" <|
+            \_ ->
+                let
+                    cfg =
+                        Video.Config.defaultConfig
+                            (Media.id "v")
+                            (Video.Source.plain "https://example.com/v.mp4")
+                in
+                case cfg.theme of
+                    Video.Config.Light ->
+                        Expect.equal True True
+
+                    _ ->
+                        Expect.fail "Expected Light theme"
+
+        , test "defaultConfig uses Ratio16x9 aspect ratio" <|
+            \_ ->
+                let
+                    cfg =
+                        Video.Config.defaultConfig
+                            (Media.id "v")
+                            (Video.Source.plain "https://example.com/v.mp4")
+                in
+                case cfg.aspectRatio of
+                    Video.Config.Ratio16x9 ->
+                        Expect.equal True True
+
+                    _ ->
+                        Expect.fail "Expected Ratio16x9"
+
+        , test "defaultConfig has showControls enabled" <|
+            \_ ->
+                let
+                    cfg =
+                        Video.Config.defaultConfig
+                            (Media.id "v")
+                            (Video.Source.plain "https://example.com/v.mp4")
+                in
+                Expect.equal True cfg.showControls
+
+        , test "defaultConfig has keyboardShortcuts enabled" <|
+            \_ ->
+                let
+                    cfg =
+                        Video.Config.defaultConfig
+                            (Media.id "v")
+                            (Video.Source.plain "https://example.com/v.mp4")
+                in
+                Expect.equal True cfg.keyboardShortcuts
+
+        , test "Custom aspect ratio stores the ratio" <|
+            \_ ->
+                let
+                    ratio = 1.777
+                in
+                case Video.Config.CustomRatio ratio of
+                    Video.Config.CustomRatio r ->
+                        Expect.within (Expect.Absolute 0.001) ratio r
+
+                    _ ->
+                        Expect.fail "Expected CustomRatio"
+        ]
+
+
+
+-- CAPTION TRACK
+
+
+captionTrackTests : Test
+captionTrackTests =
+    describe "Video.Caption.Track"
+        [ test "fields are accessible" <|
+            \_ ->
+                let
+                    track : Video.Caption.Track
+                    track =
+                        { index = 0
+                        , label = "English"
+                        , language = "en"
+                        , kind = "subtitles"
+                        }
+                in
+                Expect.all
+                    [ \_ -> Expect.equal 0 track.index
+                    , \_ -> Expect.equal "English" track.label
+                    , \_ -> Expect.equal "en" track.language
+                    , \_ -> Expect.equal "subtitles" track.kind
+                    ]
+                    ()
+        ]
+
+
+
+-- HLS INTERNAL MSG
+
+
+hlsInternalMsgTests : Test
+hlsInternalMsgTests =
+    describe "HlsInternalMsg"
+        [ test "HlsError carries detail and fatal flag" <|
+            \_ ->
+                let
+                    msg : Video.HlsInternalMsg
+                    msg = Video.HlsError "network error" True
+                in
+                case msg of
+                    Video.HlsError detail isFatal ->
+                        Expect.all
+                            [ \_ -> Expect.equal "network error" detail
+                            , \_ -> Expect.equal True isFatal
+                            ]
+                            ()
+
+                    _ ->
+                        Expect.fail "Expected HlsError"
+
+        , test "HlsError non-fatal carries isFatal False" <|
+            \_ ->
+                let
+                    msg : Video.HlsInternalMsg
+                    msg = Video.HlsError "buffer stall" False
+                in
+                case msg of
+                    Video.HlsError _ isFatal ->
+                        Expect.equal False isFatal
+
+                    _ ->
+                        Expect.fail "Expected HlsError"
+
+        , test "HlsFragLoaded is distinct from HlsError" <|
+            \_ ->
+                let
+                    msg : Video.HlsInternalMsg
+                    msg = Video.HlsFragLoaded
+
+                    isError : Video.HlsInternalMsg -> Bool
+                    isError m =
+                        case m of
+                            Video.HlsError _ _ -> True
+                            _ -> False
+                in
+                Expect.equal False (isError msg)
+        ]
+
+
+
+-- DASH INTERNAL MSG
+
+
+dashInternalMsgTests : Test
+dashInternalMsgTests =
+    describe "DashInternalMsg"
+        [ test "DashError carries the error message" <|
+            \_ ->
+                let
+                    msg : Video.DashInternalMsg
+                    msg = Video.DashError "manifest parse failed"
+                in
+                case msg of
+                    Video.DashError detail ->
+                        Expect.equal "manifest parse failed" detail
+
+                    _ ->
+                        Expect.fail "Expected DashError"
+
+        , test "DashStreamInitialized is distinct from DashError" <|
+            \_ ->
+                let
+                    msg : Video.DashInternalMsg
+                    msg = Video.DashStreamInitialized
+
+                    isError : Video.DashInternalMsg -> Bool
+                    isError m =
+                        case m of
+                            Video.DashError _ -> True
+                            _ -> False
+                in
+                Expect.equal False (isError msg)
+
+        , test "DashQualitiesLoaded carries quality list" <|
+            \_ ->
+                let
+                    qualities =
+                        [ { index = 0, label = "720p", bitrate = 2000000, width = 1280, height = 720 } ]
+
+                    msg : Video.DashInternalMsg
+                    msg = Video.DashQualitiesLoaded qualities
+                in
+                case msg of
+                    Video.DashQualitiesLoaded qs ->
+                        Expect.equal 1 (List.length qs)
+
+                    _ ->
+                        Expect.fail "Expected DashQualitiesLoaded"
+
+        , test "DashQualitiesLoaded empty list is valid" <|
+            \_ ->
+                let
+                    msg : Video.DashInternalMsg
+                    msg = Video.DashQualitiesLoaded []
+                in
+                case msg of
+                    Video.DashQualitiesLoaded qs ->
+                        Expect.equal 0 (List.length qs)
+
+                    _ ->
+                        Expect.fail "Expected DashQualitiesLoaded"
+        ]
+
+
+
+-- THUMBNAIL INTERNAL MSG
+
+
+thumbnailInternalMsgTests : Test
+thumbnailInternalMsgTests =
+    describe "ThumbnailInternalMsg"
+        [ test "ThumbnailHoverAt carries time and position" <|
+            \_ ->
+                let
+                    msg : Video.ThumbnailInternalMsg
+                    msg = Video.ThumbnailHoverAt 30.0 0.5
+                in
+                case msg of
+                    Video.ThumbnailHoverAt t pos ->
+                        Expect.all
+                            [ \_ -> Expect.equal 30.0 t
+                            , \_ -> Expect.equal 0.5 pos
+                            ]
+                            ()
+
+                    _ ->
+                        Expect.fail "Expected ThumbnailHoverAt"
+
+        , test "ThumbnailHoverAt position is clamped between 0 and 1" <|
+            \_ ->
+                let
+                    msg : Video.ThumbnailInternalMsg
+                    msg = Video.ThumbnailHoverAt 0.0 0.0
+                in
+                case msg of
+                    Video.ThumbnailHoverAt _ pos ->
+                        Expect.all
+                            [ \_ -> Expect.equal True (pos >= 0.0)
+                            , \_ -> Expect.equal True (pos <= 1.0)
+                            ]
+                            ()
+
+                    _ ->
+                        Expect.fail "Expected ThumbnailHoverAt"
+
+        , test "ThumbnailHoverLeave is distinct from ThumbnailHoverAt" <|
+            \_ ->
+                let
+                    msg : Video.ThumbnailInternalMsg
+                    msg = Video.ThumbnailHoverLeave
+
+                    isHoverAt : Video.ThumbnailInternalMsg -> Bool
+                    isHoverAt m =
+                        case m of
+                            Video.ThumbnailHoverAt _ _ -> True
+                            _ -> False
+                in
+                Expect.equal False (isHoverAt msg)
+        ]
+
+
+
+-- SUBSCRIPTIONS
+
+
+subscriptionsTests : Test
+subscriptionsTests =
+    describe "subscriptions"
+        [ test "subscriptions accepts a Config and State without error" <|
+            \_ ->
+                let
+                    cfg =
+                        Video.Config.defaultConfig
+                            (Media.id "sub-test")
+                            (Video.Source.plain "https://example.com/v.mp4")
+
+                    ( state, _ ) =
+                        Video.init cfg
+
+                    -- Sub Msg is opaque; this verifies the function type-checks
+                    -- and accepts values produced by init.
+                    isSubMsg : Sub Video.Msg -> Bool
+                    isSubMsg _ = True
+                in
+                Expect.equal True (isSubMsg (Video.subscriptions cfg state))
+
+        , test "subscriptions with HLS source type-checks" <|
+            \_ ->
+                let
+                    cfg =
+                        Video.Config.defaultConfig
+                            (Media.id "hls-sub")
+                            (Video.Source.hls "https://example.com/stream.m3u8")
+
+                    ( state, _ ) =
+                        Video.init cfg
+
+                    isSubMsg : Sub Video.Msg -> Bool
+                    isSubMsg _ = True
+                in
+                Expect.equal True (isSubMsg (Video.subscriptions cfg state))
+        ]

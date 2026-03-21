@@ -1,0 +1,162 @@
+module Video.Caption exposing
+    ( Track
+    , view
+    )
+
+
+{-| Caption and subtitle overlay for `canopy/video`.
+
+Renders an absolutely-positioned overlay filling the video area above
+the control bar. Each active VTT cue is positioned individually using
+the cue's `CueSettings` (line, position, size, align, vertical direction).
+
+Cue text is taken from `Media.Track.Cue` records obtained via
+`Media.Track.getActiveCues`.
+
+# Types
+@docs Track
+
+# View
+@docs view
+
+-}
+
+
+import Css
+import Css.Value
+import Html
+import Media.Track
+
+
+
+-- TYPES
+
+
+{-| Metadata for a single text track available on the media element.
+
+  - `index` — the track's position in the player's caption track list.
+  - `label` — human-readable track label (e.g. `"English"`).
+  - `language` — BCP 47 language tag (e.g. `"en"`, `"fr-CA"`).
+  - `kind` — the track kind string (e.g. `"subtitles"`, `"captions"`).
+
+-}
+type alias Track =
+    { index : Int
+    , label : String
+    , language : String
+    , kind : String
+    }
+
+
+
+-- VIEW
+
+
+{-| Render the caption overlay.
+
+Positions the overlay absolutely over the video, from top to 48 px
+above the controls. Each cue is positioned according to its VTT
+`CueSettings` (line, position, size, alignment, writing direction).
+When `visible` is False or the cue list is empty, the overlay is
+transparent and contains no children.
+
+    Video.Caption.view
+        { activeCues = model.activeCues
+        , visible = model.activeCaptionTrack /= Nothing
+        }
+
+-}
+view : { activeCues : List Media.Track.Cue, visible : Bool } -> Html.Html msg
+view { activeCues, visible } =
+    Html.div
+        [ Css.inlineStyle
+            [ Css.position Css.Value.absolute
+            , Css.top Css.Value.zero
+            , Css.left Css.Value.zero
+            , Css.right Css.Value.zero
+            , Css.bottom (Css.Value.px 48)
+            , Css.pointerEvents Css.Value.none
+            , Css.zIndex (Css.Value.int_ 20)
+            , Css.overflow Css.Value.hidden
+            ]
+        ]
+        (if visible then List.map cueView activeCues else [])
+
+
+cueView : Media.Track.Cue -> Html.Html msg
+cueView cue =
+    let
+        settings =
+            Maybe.withDefault Media.Track.defaultCueSettings cue.settings
+
+        -- Horizontal position of the cue box anchor point (0–100 %).
+        -- Defaults to 50 % (centred) when position is unset.
+        anchorPct =
+            Maybe.withDefault 50 settings.position
+
+        -- Width of the cue box as a percentage of the container.
+        widthPct =
+            max 1 (min 100 settings.size)
+
+        -- Vertical position from the top (percentage).
+        -- LineAuto → 85 % (near bottom, above controls)
+        -- LineNumber n, snapToLines = True  → integer line grid (≈ 5.33 % per line)
+        -- LineNumber n, snapToLines = False → n is already a percentage from top
+        topPct =
+            case settings.line of
+                Media.Track.LineAuto ->
+                    85.0
+
+                Media.Track.LineNumber n ->
+                    if settings.snapToLines then
+                        if n < 0 then
+                            100.0 + n * 5.33
+                        else
+                            n * 5.33
+                    else
+                        n
+
+        clampedTop =
+            max 0 (min 95 topPct)
+
+        textAlignValue =
+            case settings.align of
+                Media.Track.AlignStart -> Css.Value.left_
+                Media.Track.AlignLeft -> Css.Value.left_
+                Media.Track.AlignEnd -> Css.Value.right_
+                Media.Track.AlignRight -> Css.Value.right_
+                Media.Track.AlignCenter -> Css.Value.center
+
+        writingModeStyles =
+            case settings.vertical of
+                Nothing ->
+                    []
+
+                Just Media.Track.Horizontal ->
+                    []
+
+                Just Media.Track.VerticalGrowingRight ->
+                    [ Css.property "writing-mode" "vertical-rl" ]
+
+                Just Media.Track.VerticalGrowingLeft ->
+                    [ Css.property "writing-mode" "vertical-lr" ]
+    in
+    Html.div
+        [ Css.inlineStyle
+            ([ Css.position Css.Value.absolute
+             , Css.left (Css.Value.pct anchorPct)
+             , Css.top (Css.Value.pct clampedTop)
+             , Css.transform [ Css.Value.translate (Css.Value.pct -50) Css.Value.zero ]
+             , Css.width (Css.Value.pct widthPct)
+             , Css.backgroundColor (Css.Value.rgba 0 0 0 0.8)
+             , Css.color (Css.Value.hex "#ffffff")
+             , Css.fontSize (Css.Value.rem 1)
+             , Css.lineHeight (Css.Value.num 1.4)
+             , Css.padding2 (Css.Value.px 4) (Css.Value.px 8)
+             , Css.borderRadius (Css.Value.px 2)
+             , Css.textAlign textAlignValue
+             , Css.whiteSpace Css.Value.preWrap
+             ] ++ writingModeStyles
+            )
+        ]
+        [ Html.text cue.text ]

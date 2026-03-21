@@ -1,0 +1,122 @@
+module Video.Source exposing
+    ( Source(..)
+    , ProtectionData
+    , plain
+    , plainWithType
+    , hls
+    , dash
+    , dashProtected
+    )
+
+
+{-| Video source configuration for `canopy/video`.
+
+Describes where the video content comes from and how to play it. The
+player selects the appropriate streaming strategy based on the source
+variant: plain HTML5, HLS via hls.js, or DASH via dash.js.
+
+# Type
+@docs Source, ProtectionData
+
+# Constructors
+@docs plain, plainWithType, hls, dash, dashProtected
+
+-}
+
+
+
+-- SOURCE TYPES
+
+
+{-| A video source configuration.
+
+  - `Plain url mimeType` — a direct URL to an mp4, webm, or other file.
+    The optional MIME type helps the browser negotiate format support.
+  - `Hls url` — an HLS manifest URL (`.m3u8`). Played via hls.js when
+    native HLS is not supported (Chrome, Firefox), or via native
+    `<video src>` on Safari.
+  - `Dash url protectionData` — an MPEG-DASH manifest URL (`.mpd`).
+    Played via dash.js. Pass `Just` protection data for DRM content.
+
+-}
+type Source
+    = Plain String (Maybe String)
+    | Hls String
+    | Dash String (Maybe ProtectionData)
+
+
+{-| DRM protection configuration for encrypted DASH streams.
+
+  - `keySystem` — the CDM key system string, e.g. `"com.widevine.alpha"`,
+    `"com.microsoft.playready"`, or `"com.apple.fps"`.
+  - `licenseServer` — URL of the license server that will respond to
+    key acquisition requests.
+
+-}
+type alias ProtectionData =
+    { keySystem : String
+    , licenseServer : String
+    }
+
+
+
+-- CONSTRUCTORS
+
+
+{-| Create a plain source from a URL without a MIME type hint.
+
+    Video.Source.plain "https://example.com/video.mp4"
+
+-}
+plain : String -> Source
+plain url =
+    Plain url Nothing
+
+
+{-| Create a plain source from a URL with an explicit MIME type.
+
+Providing the type avoids format-probing round-trips in the browser.
+
+    Video.Source.plainWithType "https://example.com/video.webm" "video/webm"
+
+-}
+plainWithType : String -> String -> Source
+plainWithType url mimeType =
+    Plain url (Just mimeType)
+
+
+{-| Create an HLS source from a manifest URL.
+
+The player uses hls.js for MSE-capable browsers and falls back to
+native `<video src>` on Safari (which has built-in HLS support).
+
+    Video.Source.hls "https://example.com/stream.m3u8"
+
+-}
+hls : String -> Source
+hls url =
+    Hls url
+
+
+{-| Create an unprotected DASH source from a manifest URL.
+
+    Video.Source.dash "https://example.com/stream.mpd"
+
+-}
+dash : String -> Source
+dash url =
+    Dash url Nothing
+
+
+{-| Create a DRM-protected DASH source.
+
+    Video.Source.dashProtected
+        "https://example.com/stream.mpd"
+        { keySystem = "com.widevine.alpha"
+        , licenseServer = "https://license.example.com/"
+        }
+
+-}
+dashProtected : String -> ProtectionData -> Source
+dashProtected url protData =
+    Dash url (Just protData)

@@ -1,0 +1,33 @@
+{
+    "type": "package",
+    "name": "canopy/video",
+    "summary": "Production-ready video player for Canopy — HLS/DASH adaptive streaming, keyboard shortcuts, accessible controls, captions, seek thumbnails, and responsive layout",
+    "license": "BSD-3-Clause",
+    "version": "1.0.0",
+    "exposed-modules": [
+        "Video",
+        "Video.Source",
+        "Video.Config",
+        "Video.Controls",
+        "Video.Caption",
+        "Video.Thumbnail"
+    ],
+    "canopy-version": "0.19.0 <= v < 0.20.0",
+    "dependencies": {
+        "canopy/core": "1.0.0 <= v < 2.0.0",
+        "canopy/html": "1.0.0 <= v < 2.0.0",
+        "canopy/json": "1.0.0 <= v < 2.0.0",
+        "canopy/media": "4.0.0 <= v < 5.0.0",
+        "canopy/hls": "1.0.0 <= v < 2.0.0",
+        "canopy/dash": "1.0.0 <= v < 2.0.0",
+        "canopy/css": "1.0.0 <= v < 2.0.0",
+        "canopy/animation": "1.0.0 <= v < 2.0.0",
+        "canopy/headless-ui": "1.0.0 <= v < 2.0.0",
+        "canopy/keyboard": "1.0.0 <= v < 2.0.0",
+        "canopy/debounce-throttle": "1.0.0 <= v < 2.0.0",
+        "canopy/web-apis-observers": "1.0.0 <= v < 2.0.0"
+    },
+    "test-dependencies": {
+        "canopy/test": "1.0.0 <= v < 3.0.0"
+    }
+}

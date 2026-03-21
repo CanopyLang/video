@@ -1,0 +1,891 @@
+module Video.Controls exposing
+    ( PlayPauseConfig
+    , SeekBarConfig
+    , VolumeConfig
+    , TimeDisplayConfig
+    , FullscreenConfig
+    , PipConfig
+    , QualityMenuConfig
+    , CaptionsMenuConfig
+    , SpeedMenuConfig
+    , RemoteConfig
+    , playPauseButton
+    , seekBar
+    , volumeControl
+    , timeDisplay
+    , fullscreenButton
+    , pipButton
+    , qualityMenu
+    , captionsMenu
+    , speedMenu
+    , remoteButton
+    )
+
+
+{-| Composable individual control components for `canopy/video`.
+
+Each function accepts an explicit configuration record and returns
+`Html.Html msg`, making the controls usable with any message type.
+The `Video` module uses these functions internally and provides
+convenience wrappers that pass the right callbacks from `Video.Msg`.
+
+# Play / Pause
+@docs PlayPauseConfig, playPauseButton
+
+# Seek Bar
+@docs SeekBarConfig, seekBar
+
+# Volume
+@docs VolumeConfig, volumeControl
+
+# Time Display
+@docs TimeDisplayConfig, timeDisplay
+
+# Fullscreen
+@docs FullscreenConfig, fullscreenButton
+
+# Picture-in-Picture
+@docs PipConfig, pipButton
+
+# Quality Selector
+@docs QualityMenuConfig, qualityMenu
+
+# Captions Selector
+@docs CaptionsMenuConfig, captionsMenu
+
+# Playback Speed
+@docs SpeedMenuConfig, speedMenu
+
+# Remote Playback
+@docs RemoteConfig, remoteButton
+
+-}
+
+
+import Css
+import Css.Value
+import Html
+import Html.Attributes as Attr
+import Html.Events as Events
+import Json.Decode as Decode
+import Video.Caption
+
+
+
+-- CONFIG TYPES
+
+
+{-| Configuration for `playPauseButton`. -}
+type alias PlayPauseConfig msg =
+    { onPlayPause : msg
+    , paused : Bool
+    }
+
+
+{-| Configuration for `seekBar`. -}
+type alias SeekBarConfig msg =
+    { onSeek : Float -> msg
+    , onThumbnailHover : Maybe (Float -> Float -> msg)
+    , onThumbnailLeave : Maybe msg
+    , currentTime : Float
+    , duration : Float
+    , buffered : List { start : Float, end : Float }
+    , showThumbnail : Bool
+    }
+
+
+{-| Configuration for `volumeControl`. -}
+type alias VolumeConfig msg =
+    { onSetVolume : Float -> msg
+    , onToggleMute : msg
+    , volume : Float
+    , muted : Bool
+    }
+
+
+{-| Configuration for `timeDisplay`. -}
+type alias TimeDisplayConfig =
+    { currentTime : Float
+    , duration : Float
+    }
+
+
+{-| Configuration for `fullscreenButton`. -}
+type alias FullscreenConfig msg =
+    { onToggle : msg
+    , isFullscreen : Bool
+    }
+
+
+{-| Configuration for `pipButton`. -}
+type alias PipConfig msg =
+    { onToggle : msg
+    , isPip : Bool
+    }
+
+
+{-| Configuration for `qualityMenu`. -}
+type alias QualityMenuConfig msg =
+    { onSelect : Int -> msg
+    , onOpen : msg
+    , onClose : msg
+    , isOpen : Bool
+    , levels : List { index : Int, label : String, bitrate : Int }
+    , currentLevel : Int
+    }
+
+
+{-| Configuration for `captionsMenu`. -}
+type alias CaptionsMenuConfig msg =
+    { onSelect : Maybe Int -> msg
+    , onOpen : msg
+    , onClose : msg
+    , isOpen : Bool
+    , tracks : List Video.Caption.Track
+    , activeTrack : Maybe Int
+    }
+
+
+{-| Configuration for `speedMenu`. -}
+type alias SpeedMenuConfig msg =
+    { onSelect : Float -> msg
+    , onOpen : msg
+    , onClose : msg
+    , isOpen : Bool
+    , currentRate : Float
+    }
+
+
+{-| Configuration for `remoteButton`. -}
+type alias RemoteConfig msg =
+    { onToggle : msg
+    }
+
+
+
+-- CONTROLS
+
+
+{-| A play/pause toggle button with an SVG icon and accessible label.
+
+    Video.Controls.playPauseButton
+        { onPlayPause = PlayPause
+        , paused = state.paused
+        }
+
+-}
+playPauseButton : PlayPauseConfig msg -> Html.Html msg
+playPauseButton cfg =
+    Html.button
+        [ Css.inlineStyle iconButtonStyle
+        , Attr.attribute "aria-label" (if cfg.paused then "Play" else "Pause")
+        , Events.onClick cfg.onPlayPause
+        ]
+        [ if cfg.paused then
+            svgPlay
+          else
+            svgPause
+        ]
+
+
+{-| A seek bar showing playback position, buffer fill, and an optional
+thumbnail preview on hover.
+
+Clicking or dragging the bar seeks to a new position. Position is
+reported as a time in seconds computed from the click offset.
+
+    Video.Controls.seekBar
+        { onSeek = SeekTo
+        , onThumbnailHover = Just ThumbnailHovering
+        , onThumbnailLeave = Just ThumbnailLeft
+        , currentTime = state.currentTime
+        , duration = state.duration
+        , buffered = state.buffered
+        , showThumbnail = True
+        }
+
+-}
+seekBar : SeekBarConfig msg -> Html.Html msg
+seekBar cfg =
+    let
+        progress =
+            if cfg.duration > 0 then
+                cfg.currentTime / cfg.duration * 100
+            else
+                0
+
+        seekOnClick =
+            Events.on "click"
+                (Decode.map2
+                    (\offsetX targetWidth ->
+                        cfg.onSeek (offsetX / targetWidth * cfg.duration)
+                    )
+                    (Decode.field "offsetX" Decode.float)
+                    (Decode.at [ "currentTarget", "offsetWidth" ] Decode.float)
+                )
+
+        hoverHandlers =
+            case ( cfg.onThumbnailHover, cfg.onThumbnailLeave ) of
+                ( Just onHover, Just onLeave ) ->
+                    [ Events.on "mousemove"
+                        (Decode.map2
+                            (\offsetX targetWidth ->
+                                let
+                                    pos = offsetX / targetWidth
+                                    t = pos * cfg.duration
+                                in
+                                onHover t pos
+                            )
+                            (Decode.field "offsetX" Decode.float)
+                            (Decode.at [ "currentTarget", "offsetWidth" ] Decode.float)
+                        )
+                    , Events.onMouseLeave onLeave
+                    ]
+
+                _ ->
+                    []
+    in
+    Html.div
+        ([ Css.inlineStyle
+            [ Css.position Css.Value.relative
+            , Css.property "flex" "1"
+            , Css.height (Css.Value.px 4)
+            , Css.backgroundColor (Css.Value.rgba 255 255 255 0.3)
+            , Css.borderRadius (Css.Value.px 2)
+            , Css.cursor Css.Value.pointer
+            , Css.margin2 Css.Value.zero (Css.Value.px 8)
+            ]
+         , Attr.attribute "role" "slider"
+         , Attr.attribute "aria-label" "Seek"
+         , Attr.attribute "aria-valuemin" "0"
+         , Attr.attribute "aria-valuemax" (String.fromFloat cfg.duration)
+         , Attr.attribute "aria-valuenow" (String.fromFloat cfg.currentTime)
+         , seekOnClick
+         ] ++ hoverHandlers)
+        [ -- All buffered ranges
+          Html.div [] (List.map (bufferedRangeDiv cfg.duration) cfg.buffered)
+        , -- Playback progress
+          Html.div
+            [ Css.inlineStyle
+                [ Css.position Css.Value.absolute
+                , Css.left Css.Value.zero
+                , Css.top Css.Value.zero
+                , Css.height (Css.Value.pct 100)
+                , Css.width (Css.Value.pct progress)
+                , Css.property "background-color" "var(--video-progress-fill, #ff0000)"
+                , Css.borderRadius (Css.Value.px 2)
+                ]
+            ]
+            []
+        , -- Thumb
+          Html.div
+            [ Css.inlineStyle
+                [ Css.position Css.Value.absolute
+                , Css.left (Css.Value.pct progress)
+                , Css.top (Css.Value.pct 50)
+                , Css.width (Css.Value.px 12)
+                , Css.height (Css.Value.px 12)
+                , Css.property "background-color" "var(--video-progress-thumb, #ffffff)"
+                , Css.borderRadius (Css.Value.pct 50)
+                , Css.transform [ Css.Value.translate (Css.Value.pct -50) (Css.Value.pct -50) ]
+                ]
+            ]
+            []
+        ]
+
+
+{-| A combined volume slider and mute toggle button.
+
+    Video.Controls.volumeControl
+        { onSetVolume = SetVolume
+        , onToggleMute = ToggleMute
+        , volume = state.volume
+        , muted = state.muted
+        }
+
+-}
+volumeControl : VolumeConfig msg -> Html.Html msg
+volumeControl cfg =
+    let
+        displayVolume =
+            if cfg.muted then 0.0 else cfg.volume
+
+        volumePct =
+            displayVolume * 100
+
+        onSliderInput =
+            Events.on "input"
+                (Decode.map
+                    (\v -> cfg.onSetVolume (v / 100))
+                    (Decode.at [ "target", "value" ] Decode.float)
+                )
+    in
+    Html.div
+        [ Css.inlineStyle
+            [ Css.display Css.Value.flex_
+            , Css.alignItems Css.Value.center
+            , Css.gap (Css.Value.px 4)
+            ]
+        ]
+        [ Html.button
+            [ Css.inlineStyle iconButtonStyle
+            , Attr.attribute "aria-label" (if cfg.muted || cfg.volume == 0 then "Unmute" else "Mute")
+            , Events.onClick cfg.onToggleMute
+            ]
+            [ if cfg.muted || cfg.volume == 0 then svgVolumeMuted else svgVolumeOn ]
+        , Html.input
+            [ Attr.type_ "range"
+            , Attr.attribute "min" "0"
+            , Attr.attribute "max" "100"
+            , Attr.attribute "step" "1"
+            , Attr.attribute "value" (String.fromFloat volumePct)
+            , Css.inlineStyle
+                [ Css.width (Css.Value.px 60)
+                , Css.cursor Css.Value.pointer
+                ]
+            , Attr.attribute "aria-label" "Volume"
+            , onSliderInput
+            ]
+            []
+        ]
+
+
+{-| A time display showing `currentTime / duration` as `M:SS / M:SS`.
+
+    Video.Controls.timeDisplay
+        { currentTime = state.currentTime
+        , duration = state.duration
+        }
+
+-}
+timeDisplay : TimeDisplayConfig -> Html.Html msg
+timeDisplay cfg =
+    Html.span
+        [ Css.inlineStyle
+            [ Css.color Css.Value.inherit_
+            , Css.fontSize (Css.Value.rem 0.8125)
+            , Css.fontFamily [ "monospace" ]
+            , Css.whiteSpace Css.Value.nowrap
+            , Css.padding2 Css.Value.zero (Css.Value.px 8)
+            ]
+        ]
+        [ Html.text (formatTime cfg.currentTime ++ " / " ++ formatTime cfg.duration) ]
+
+
+{-| A fullscreen toggle button with an SVG icon.
+
+    Video.Controls.fullscreenButton
+        { onToggle = ToggleFullscreen
+        , isFullscreen = state.isFullscreen
+        }
+
+-}
+fullscreenButton : FullscreenConfig msg -> Html.Html msg
+fullscreenButton cfg =
+    Html.button
+        [ Css.inlineStyle iconButtonStyle
+        , Attr.attribute "aria-label" (if cfg.isFullscreen then "Exit fullscreen" else "Enter fullscreen")
+        , Events.onClick cfg.onToggle
+        ]
+        [ if cfg.isFullscreen then svgExitFullscreen else svgEnterFullscreen ]
+
+
+{-| A Picture-in-Picture toggle button.
+
+    Video.Controls.pipButton
+        { onToggle = TogglePip
+        , isPip = state.isPip
+        }
+
+-}
+pipButton : PipConfig msg -> Html.Html msg
+pipButton cfg =
+    Html.button
+        [ Css.inlineStyle iconButtonStyle
+        , Attr.attribute "aria-label" (if cfg.isPip then "Exit picture-in-picture" else "Picture-in-picture")
+        , Events.onClick cfg.onToggle
+        ]
+        [ svgPip ]
+
+
+{-| A quality-level selector dropdown menu.
+
+Displays a list of available quality levels. Selecting a level triggers
+`onSelect` with the level index (-1 for automatic).
+
+    Video.Controls.qualityMenu
+        { onSelect = SetQuality
+        , levels = state.availableQualities
+        , currentLevel = state.currentQualityIndex
+        }
+
+-}
+qualityMenu : QualityMenuConfig msg -> Html.Html msg
+qualityMenu cfg =
+    let
+        levelLabel lvl =
+            if lvl.label /= "" then
+                lvl.label
+            else if lvl.bitrate > 0 then
+                String.fromInt (lvl.bitrate // 1000) ++ "k"
+            else
+                "Level " ++ String.fromInt lvl.index
+
+        currentLabel =
+            if cfg.currentLevel == -1 then
+                "Auto"
+            else
+                case List.filter (\l -> l.index == cfg.currentLevel) cfg.levels of
+                    [ lvl ] ->
+                        levelLabel lvl
+
+                    _ ->
+                        "Auto"
+
+        renderOption lvl =
+            Html.li
+                [ Css.inlineStyle
+                    [ Css.padding2 (Css.Value.px 6) (Css.Value.px 12)
+                    , Css.cursor Css.Value.pointer
+                    , Css.property "list-style" "none"
+                    , Css.backgroundColor
+                        (if lvl.index == cfg.currentLevel then
+                            Css.Value.rgba 255 255 255 0.15
+                         else
+                            Css.Value.transparent
+                        )
+                    ]
+                , Events.onClick (cfg.onSelect lvl.index)
+                ]
+                [ Html.text (levelLabel lvl) ]
+
+        autoOption =
+            Html.li
+                [ Css.inlineStyle
+                    [ Css.padding2 (Css.Value.px 6) (Css.Value.px 12)
+                    , Css.cursor Css.Value.pointer
+                    , Css.property "list-style" "none"
+                    , Css.backgroundColor
+                        (if cfg.currentLevel == -1 then
+                            Css.Value.rgba 255 255 255 0.15
+                         else
+                            Css.Value.transparent
+                        )
+                    ]
+                , Events.onClick (cfg.onSelect -1)
+                ]
+                [ Html.text "Auto" ]
+    in
+    if List.isEmpty cfg.levels then
+        Html.text ""
+    else
+        Html.div
+            [ Css.inlineStyle
+                [ Css.position Css.Value.relative
+                , Css.display Css.Value.inlineBlock
+                ]
+            ]
+            [ Html.button
+                [ Css.inlineStyle
+                    [ Css.width Css.Value.auto
+                    , Css.minWidth (Css.Value.px 40)
+                    , Css.height (Css.Value.px 40)
+                    , Css.property "background" "none"
+                    , Css.property "border" "none"
+                    , Css.color Css.Value.inherit_
+                    , Css.cursor Css.Value.pointer
+                    , Css.fontSize (Css.Value.rem 0.75)
+                    , Css.padding2 Css.Value.zero (Css.Value.px 6)
+                    , Css.borderRadius (Css.Value.px 4)
+                    ]
+                , Attr.attribute "aria-label" "Quality"
+                , Attr.attribute "aria-expanded" (if cfg.isOpen then "true" else "false")
+                , Events.onClick (if cfg.isOpen then cfg.onClose else cfg.onOpen)
+                ]
+                [ Html.text currentLabel ]
+            , if cfg.isOpen then
+                Html.ul
+                    [ Css.inlineStyle
+                        [ Css.position Css.Value.absolute
+                        , Css.bottom (Css.Value.pct 100)
+                        , Css.right Css.Value.zero
+                        , Css.backgroundColor (Css.Value.rgba 0 0 0 0.9)
+                        , Css.borderRadius (Css.Value.px 4)
+                        , Css.padding2 (Css.Value.px 4) Css.Value.zero
+                        , Css.margin Css.Value.zero
+                        , Css.minWidth (Css.Value.px 80)
+                        , Css.zIndex (Css.Value.int_ 40)
+                        ]
+                    ]
+                    (autoOption :: List.map renderOption cfg.levels)
+              else
+                Html.text ""
+            ]
+
+
+{-| A captions/subtitles track selector.
+
+Displays available text tracks. Selecting a track triggers `onSelect`
+with the track index; selecting Off triggers `onSelect Nothing`.
+
+    Video.Controls.captionsMenu
+        { onSelect = SetCaptionTrack
+        , tracks = state.captionTracks
+        , activeTrack = state.activeCaptionTrack
+        }
+
+-}
+captionsMenu : CaptionsMenuConfig msg -> Html.Html msg
+captionsMenu cfg =
+    if List.isEmpty cfg.tracks then
+        Html.text ""
+    else
+        let
+            offOption =
+                Html.li
+                    [ Css.inlineStyle
+                        [ Css.padding2 (Css.Value.px 6) (Css.Value.px 12)
+                        , Css.cursor Css.Value.pointer
+                        , Css.property "list-style" "none"
+                        , Css.backgroundColor
+                            (if cfg.activeTrack == Nothing then
+                                Css.Value.rgba 255 255 255 0.15
+                             else
+                                Css.Value.transparent
+                            )
+                        ]
+                    , Events.onClick (cfg.onSelect Nothing)
+                    ]
+                    [ Html.text "Off" ]
+
+            renderTrack track =
+                Html.li
+                    [ Css.inlineStyle
+                        [ Css.padding2 (Css.Value.px 6) (Css.Value.px 12)
+                        , Css.cursor Css.Value.pointer
+                        , Css.property "list-style" "none"
+                        , Css.backgroundColor
+                            (if cfg.activeTrack == Just track.index then
+                                Css.Value.rgba 255 255 255 0.15
+                             else
+                                Css.Value.transparent
+                            )
+                        ]
+                    , Events.onClick (cfg.onSelect (Just track.index))
+                    ]
+                    [ Html.text (if track.label /= "" then track.label else track.language) ]
+        in
+        Html.div
+            [ Css.inlineStyle
+                [ Css.position Css.Value.relative
+                , Css.display Css.Value.inlineBlock
+                ]
+            ]
+            [ Html.button
+                [ Css.inlineStyle iconButtonStyle
+                , Attr.attribute "aria-label" "Captions"
+                , Attr.attribute "aria-expanded" (if cfg.isOpen then "true" else "false")
+                , Events.onClick (if cfg.isOpen then cfg.onClose else cfg.onOpen)
+                ]
+                [ svgCaptions ]
+            , if cfg.isOpen then
+                Html.ul
+                    [ Css.inlineStyle
+                        [ Css.position Css.Value.absolute
+                        , Css.bottom (Css.Value.pct 100)
+                        , Css.right Css.Value.zero
+                        , Css.backgroundColor (Css.Value.rgba 0 0 0 0.9)
+                        , Css.borderRadius (Css.Value.px 4)
+                        , Css.padding2 (Css.Value.px 4) Css.Value.zero
+                        , Css.margin Css.Value.zero
+                        , Css.minWidth (Css.Value.px 100)
+                        , Css.zIndex (Css.Value.int_ 40)
+                        ]
+                    ]
+                    (offOption :: List.map renderTrack cfg.tracks)
+              else
+                Html.text ""
+            ]
+
+
+{-| A playback speed selector (0.25×–2×).
+
+    Video.Controls.speedMenu
+        { onSelect = SetPlaybackRate
+        , currentRate = state.playbackRate
+        }
+
+-}
+speedMenu : SpeedMenuConfig msg -> Html.Html msg
+speedMenu cfg =
+    let
+        speeds =
+            [ 0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0 ]
+
+        formatRate r =
+            if r == toFloat (round r) then
+                String.fromInt (round r) ++ "×"
+            else
+                String.fromFloat r ++ "×"
+
+        renderSpeed r =
+            Html.li
+                [ Css.inlineStyle
+                    [ Css.padding2 (Css.Value.px 6) (Css.Value.px 12)
+                    , Css.cursor Css.Value.pointer
+                    , Css.property "list-style" "none"
+                    , Css.backgroundColor
+                        (if abs (r - cfg.currentRate) < 0.01 then
+                            Css.Value.rgba 255 255 255 0.15
+                         else
+                            Css.Value.transparent
+                        )
+                    ]
+                , Events.onClick (cfg.onSelect r)
+                ]
+                [ Html.text (formatRate r) ]
+    in
+    Html.div
+        [ Css.inlineStyle
+            [ Css.position Css.Value.relative
+            , Css.display Css.Value.inlineBlock
+            ]
+        ]
+        [ Html.button
+            [ Css.inlineStyle
+                [ Css.height (Css.Value.px 40)
+                , Css.property "background" "none"
+                , Css.property "border" "none"
+                , Css.color Css.Value.inherit_
+                , Css.cursor Css.Value.pointer
+                , Css.fontSize (Css.Value.rem 0.75)
+                , Css.padding2 Css.Value.zero (Css.Value.px 6)
+                , Css.borderRadius (Css.Value.px 4)
+                ]
+            , Attr.attribute "aria-label" "Playback speed"
+            , Attr.attribute "aria-expanded" (if cfg.isOpen then "true" else "false")
+            , Events.onClick (if cfg.isOpen then cfg.onClose else cfg.onOpen)
+            ]
+            [ Html.text (formatRate cfg.currentRate) ]
+        , if cfg.isOpen then
+            Html.ul
+                [ Css.inlineStyle
+                    [ Css.position Css.Value.absolute
+                    , Css.bottom (Css.Value.pct 100)
+                    , Css.right Css.Value.zero
+                    , Css.backgroundColor (Css.Value.rgba 0 0 0 0.9)
+                    , Css.borderRadius (Css.Value.px 4)
+                    , Css.padding2 (Css.Value.px 4) Css.Value.zero
+                    , Css.margin Css.Value.zero
+                    , Css.minWidth (Css.Value.px 80)
+                    , Css.zIndex (Css.Value.int_ 40)
+                    ]
+                ]
+                (List.reverse (List.map renderSpeed speeds))
+          else
+            Html.text ""
+        ]
+
+
+{-| A remote playback (Chromecast / AirPlay) toggle button.
+
+    Video.Controls.remoteButton
+        { onToggle = ToggleRemotePlayback }
+
+-}
+remoteButton : RemoteConfig msg -> Html.Html msg
+remoteButton cfg =
+    Html.button
+        [ Css.inlineStyle iconButtonStyle
+        , Attr.attribute "aria-label" "Cast / AirPlay"
+        , Events.onClick cfg.onToggle
+        ]
+        [ svgCast ]
+
+
+
+-- HELPERS
+
+
+bufferedRangeDiv : Float -> { start : Float, end : Float } -> Html.Html msg
+bufferedRangeDiv totalDuration range =
+    let
+        leftPct =
+            if totalDuration > 0 then
+                range.start / totalDuration * 100
+            else
+                0
+
+        widthPct =
+            if totalDuration > 0 then
+                (range.end - range.start) / totalDuration * 100
+            else
+                0
+    in
+    Html.div
+        [ Css.inlineStyle
+            [ Css.position Css.Value.absolute
+            , Css.left (Css.Value.pct leftPct)
+            , Css.top Css.Value.zero
+            , Css.height (Css.Value.pct 100)
+            , Css.width (Css.Value.pct widthPct)
+            , Css.property "background-color" "var(--video-loaded-fill, rgba(255,255,255,0.4))"
+            , Css.borderRadius (Css.Value.px 2)
+            ]
+        ]
+        []
+
+
+iconButtonStyle : List Css.Style
+iconButtonStyle =
+    [ Css.width (Css.Value.px 40)
+    , Css.height (Css.Value.px 40)
+    , Css.property "background" "none"
+    , Css.property "border" "none"
+    , Css.color Css.Value.inherit_
+    , Css.cursor Css.Value.pointer
+    , Css.display Css.Value.flex_
+    , Css.alignItems Css.Value.center
+    , Css.justifyContent Css.Value.center
+    , Css.padding Css.Value.zero
+    , Css.borderRadius (Css.Value.px 4)
+    ]
+
+
+formatTime : Float -> String
+formatTime seconds =
+    let
+        totalSecs =
+            floor (max 0 seconds)
+
+        h =
+            totalSecs // 3600
+
+        m =
+            (totalSecs - h * 3600) // 60
+
+        s =
+            totalSecs - h * 3600 - m * 60
+
+        pad n =
+            if n < 10 then
+                "0" ++ String.fromInt n
+            else
+                String.fromInt n
+    in
+    if h > 0 then
+        String.fromInt h ++ ":" ++ pad m ++ ":" ++ pad s
+    else
+        pad m ++ ":" ++ pad s
+
+
+
+-- SVG ICONS
+
+
+svgPlay : Html.Html msg
+svgPlay =
+    Html.node "svg"
+        [ Attr.attribute "viewBox" "0 0 24 24"
+        , Attr.attribute "width" "24"
+        , Attr.attribute "height" "24"
+        , Attr.attribute "fill" "currentColor"
+        , Attr.attribute "aria-hidden" "true"
+        ]
+        [ Html.node "path" [ Attr.attribute "d" "M8 5v14l11-7z" ] [] ]
+
+
+svgPause : Html.Html msg
+svgPause =
+    Html.node "svg"
+        [ Attr.attribute "viewBox" "0 0 24 24"
+        , Attr.attribute "width" "24"
+        , Attr.attribute "height" "24"
+        , Attr.attribute "fill" "currentColor"
+        , Attr.attribute "aria-hidden" "true"
+        ]
+        [ Html.node "path" [ Attr.attribute "d" "M6 19h4V5H6v14zm8-14v14h4V5h-4z" ] [] ]
+
+
+svgVolumeOn : Html.Html msg
+svgVolumeOn =
+    Html.node "svg"
+        [ Attr.attribute "viewBox" "0 0 24 24"
+        , Attr.attribute "width" "20"
+        , Attr.attribute "height" "20"
+        , Attr.attribute "fill" "currentColor"
+        , Attr.attribute "aria-hidden" "true"
+        ]
+        [ Html.node "path" [ Attr.attribute "d" "M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z" ] [] ]
+
+
+svgVolumeMuted : Html.Html msg
+svgVolumeMuted =
+    Html.node "svg"
+        [ Attr.attribute "viewBox" "0 0 24 24"
+        , Attr.attribute "width" "20"
+        , Attr.attribute "height" "20"
+        , Attr.attribute "fill" "currentColor"
+        , Attr.attribute "aria-hidden" "true"
+        ]
+        [ Html.node "path" [ Attr.attribute "d" "M16.5 12c0-1.77-1.02-3.29-2.5-4.03v2.21l2.45 2.45c.03-.2.05-.41.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51C20.63 14.91 21 13.5 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3L3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06c1.38-.31 2.63-.95 3.69-1.81L19.73 21 21 19.73l-9-9L4.27 3zM12 4L9.91 6.09 12 8.18V4z" ] [] ]
+
+
+svgEnterFullscreen : Html.Html msg
+svgEnterFullscreen =
+    Html.node "svg"
+        [ Attr.attribute "viewBox" "0 0 24 24"
+        , Attr.attribute "width" "20"
+        , Attr.attribute "height" "20"
+        , Attr.attribute "fill" "currentColor"
+        , Attr.attribute "aria-hidden" "true"
+        ]
+        [ Html.node "path" [ Attr.attribute "d" "M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z" ] [] ]
+
+
+svgExitFullscreen : Html.Html msg
+svgExitFullscreen =
+    Html.node "svg"
+        [ Attr.attribute "viewBox" "0 0 24 24"
+        , Attr.attribute "width" "20"
+        , Attr.attribute "height" "20"
+        , Attr.attribute "fill" "currentColor"
+        , Attr.attribute "aria-hidden" "true"
+        ]
+        [ Html.node "path" [ Attr.attribute "d" "M5 16h3v3h2v-5H5v2zm3-8H5v2h5V5H8v3zm6 11h2v-3h3v-2h-5v5zm2-11V5h-2v5h5V8h-3z" ] [] ]
+
+
+svgPip : Html.Html msg
+svgPip =
+    Html.node "svg"
+        [ Attr.attribute "viewBox" "0 0 24 24"
+        , Attr.attribute "width" "20"
+        , Attr.attribute "height" "20"
+        , Attr.attribute "fill" "currentColor"
+        , Attr.attribute "aria-hidden" "true"
+        ]
+        [ Html.node "path" [ Attr.attribute "d" "M19 11h-8v6h8v-6zm4 10V3H1v18h22zm-2-1.98H3V4.97h18v14.05zm-6 0z" ] [] ]
+
+
+svgCaptions : Html.Html msg
+svgCaptions =
+    Html.node "svg"
+        [ Attr.attribute "viewBox" "0 0 24 24"
+        , Attr.attribute "width" "20"
+        , Attr.attribute "height" "20"
+        , Attr.attribute "fill" "currentColor"
+        , Attr.attribute "aria-hidden" "true"
+        ]
+        [ Html.node "path" [ Attr.attribute "d" "M19 4H5c-1.11 0-2 .9-2 2v12c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm-8 7H9.5v-.5h-2v3h2V13H11v1c0 .55-.45 1-1 1H7c-.55 0-1-.45-1-1v-4c0-.55.45-1 1-1h3c.55 0 1 .45 1 1v1zm7 0h-1.5v-.5h-2v3h2V13H18v1c0 .55-.45 1-1 1h-3c-.55 0-1-.45-1-1v-4c0-.55.45-1 1-1h3c.55 0 1 .45 1 1v1z" ] [] ]
+
+
+svgCast : Html.Html msg
+svgCast =
+    Html.node "svg"
+        [ Attr.attribute "viewBox" "0 0 24 24"
+        , Attr.attribute "width" "20"
+        , Attr.attribute "height" "20"
+        , Attr.attribute "fill" "currentColor"
+        , Attr.attribute "aria-hidden" "true"
+        ]
+        [ Html.node "path" [ Attr.attribute "d" "M21 3H3c-1.1 0-2 .9-2 2v3h2V5h18v14h-7v2h7c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zM1 18v3h3c0-1.66-1.34-3-3-3zm0-4v2c2.76 0 5 2.24 5 5H8c0-3.87-3.13-7-7-7zm0-4v2c4.97 0 9 4.03 9 9h2c0-6.08-4.92-11-11-11z" ] [] ]
