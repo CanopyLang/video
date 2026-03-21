@@ -83,6 +83,7 @@ import Hls
 import Html
 import Html.Attributes as Attr
 import Html.Events as Events
+import Html.Lazy as Lazy
 import Http
 import Json.Decode as Decode
 import Json.Encode
@@ -1783,14 +1784,14 @@ view config (State s) =
                 ]
             ]
             [ videoElement config s
-            , Html.lazy Video.Caption.view
+            , Lazy.lazy Video.Caption.view
                 { activeCues = s.activeCues
                 , visible = s.activeCaptionTrack /= Nothing
                 , fontSizeRem = captionFontSizeToRem config.captionStyle.fontSize
                 }
-            , Html.lazy bigPlayButton s
-            , Html.lazy bufferingSpinner s
-            , Html.lazy errorOverlay s
+            , Lazy.lazy bigPlayButton s
+            , Lazy.lazy bufferingSpinner s
+            , Lazy.lazy errorOverlay s
             , -- Accessibility live region
               Html.div
                 [ Attr.attribute "aria-live" "polite"
@@ -1809,7 +1810,7 @@ view config (State s) =
               else
                 Html.text ""
             , if config.showControls then
-                Html.lazy2 controlsBar config s
+                Lazy.lazy2 controlsBar config s
               else
                 Html.text ""
             ]

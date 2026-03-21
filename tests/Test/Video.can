@@ -1633,7 +1633,7 @@ playbackHandlerTests =
         , test "SetPlaybackRate 2.0 closes active menu and issues Cmd" <|
             \_ ->
                 let
-                    ( opened, _, _ ) = run (Video.OpenMenu "speed")
+                    ( opened, _, _ ) = run (Video.OpenMenu Video.SpeedMenu)
                     ( state, cmd, _ ) =
                         Video.update cfg (Video.SetPlaybackRate 2.0) opened
                 in
@@ -1717,14 +1717,14 @@ uiHandlerTests =
         , test "OpenMenu sets activeMenu" <|
             \_ ->
                 let
-                    ( state, _, _ ) = run (Video.OpenMenu "captions")
+                    ( state, _, _ ) = run (Video.OpenMenu Video.CaptionsMenu)
                 in
-                Expect.equal (Just "captions") (Video.activeMenu state)
+                Expect.equal (Just Video.CaptionsMenu) (Video.activeMenu state)
 
         , test "CloseMenu clears activeMenu" <|
             \_ ->
                 let
-                    ( opened, _, _ ) = run (Video.OpenMenu "captions")
+                    ( opened, _, _ ) = run (Video.OpenMenu Video.CaptionsMenu)
                     ( state, _, _ ) =
                         Video.update cfg Video.CloseMenu opened
                 in
@@ -1946,8 +1946,11 @@ gotMediaStateAnalyticsTests =
 
         ( initState, _ ) = Video.init cfg
 
+        baseMediaState =
+            Media.defaultState
+
         makeMediaState ct dur rs ended_ =
-            { Media.defaultState
+            { baseMediaState
                 | currentTime = ct
                 , duration = dur
                 , readyState = rs
