@@ -159,6 +159,7 @@ type alias SpeedMenuConfig msg =
 {-| Configuration for `remoteButton`. -}
 type alias RemoteConfig msg =
     { onToggle : msg
+    , remoteAvailable : Bool
     }
 
 
@@ -179,6 +180,7 @@ playPauseButton cfg =
     Html.button
         [ Css.inlineStyle iconButtonStyle
         , Attr.attribute "aria-label" (if cfg.paused then "Play" else "Pause")
+        , Attr.attribute "aria-pressed" (if cfg.paused then "false" else "true")
         , Events.onClick cfg.onPlayPause
         ]
         [ if cfg.paused then
@@ -330,6 +332,7 @@ volumeControl cfg =
         [ Html.button
             [ Css.inlineStyle iconButtonStyle
             , Attr.attribute "aria-label" (if cfg.muted || cfg.volume == 0 then "Unmute" else "Mute")
+            , Attr.attribute "aria-pressed" (if cfg.muted || cfg.volume == 0 then "true" else "false")
             , Events.onClick cfg.onToggleMute
             ]
             [ if cfg.muted || cfg.volume == 0 then svgVolumeMuted else svgVolumeOn ]
@@ -385,6 +388,7 @@ fullscreenButton cfg =
     Html.button
         [ Css.inlineStyle iconButtonStyle
         , Attr.attribute "aria-label" (if cfg.isFullscreen then "Exit fullscreen" else "Enter fullscreen")
+        , Attr.attribute "aria-pressed" (if cfg.isFullscreen then "true" else "false")
         , Events.onClick cfg.onToggle
         ]
         [ if cfg.isFullscreen then svgExitFullscreen else svgEnterFullscreen ]
@@ -402,7 +406,8 @@ pipButton : PipConfig msg -> Html.Html msg
 pipButton cfg =
     Html.button
         [ Css.inlineStyle iconButtonStyle
-        , Attr.attribute "aria-label" (if cfg.isPip then "Exit picture-in-picture" else "Picture-in-picture")
+        , Attr.attribute "aria-label" (if cfg.isPip then "Exit picture-in-picture" else "Enter picture-in-picture")
+        , Attr.attribute "aria-pressed" (if cfg.isPip then "true" else "false")
         , Events.onClick cfg.onToggle
         ]
         [ svgPip ]
@@ -695,12 +700,15 @@ speedMenu cfg =
 -}
 remoteButton : RemoteConfig msg -> Html.Html msg
 remoteButton cfg =
-    Html.button
-        [ Css.inlineStyle iconButtonStyle
-        , Attr.attribute "aria-label" "Cast / AirPlay"
-        , Events.onClick cfg.onToggle
-        ]
-        [ svgCast ]
+    if not cfg.remoteAvailable then
+        Html.text ""
+    else
+        Html.button
+            [ Css.inlineStyle iconButtonStyle
+            , Attr.attribute "aria-label" "Cast / AirPlay"
+            , Events.onClick cfg.onToggle
+            ]
+            [ svgCast ]
 
 
 

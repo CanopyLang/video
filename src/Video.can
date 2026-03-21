@@ -3,6 +3,8 @@ module Video exposing
     , Msg(..)
     , OutMsg(..)
     , QualityLevel
+    , ChapterCue
+    , ThumbnailSprite
     , HlsInternalMsg(..)
     , DashInternalMsg(..)
     , ThumbnailInternalMsg(..)
@@ -17,15 +19,27 @@ module Video exposing
     , currentQuality
     , availableQualities
     , captionTracks
+    , controlsVisible
+    , lastError
+    , remoteAvailable
+    , hasError
+    , isLive
+    , isFullscreen
+    , isPip
+    , isCompact
+    , activeMenu
+    , thumbnailDataUrl
+    , thumbnailCapturing
     )
 
 
 {-| Production-ready video player for Canopy.
 
 Orchestrates HLS/DASH adaptive streaming, accessible keyboard-navigable
-controls, captions with full VTT positioning, seek thumbnail preview,
-auto-hiding controls, responsive compact mode, auto-pause on scroll,
-live stream detection, and error display.
+controls, captions with full VTT positioning and inline markup, seek
+thumbnail preview via frame capture or sprite sheets, auto-hiding controls,
+responsive compact mode, auto-pause on scroll, live stream detection,
+chapter markers, touch gesture controls, and analytics OutMsg hooks.
 
 Follows The Elm Architecture: `init` creates the initial state,
 `update` handles messages, `subscriptions` wires browser observers,
@@ -33,6 +47,7 @@ and `view` renders the HTML.
 
 # State
 @docs State, Msg, OutMsg, QualityLevel
+@docs ChapterCue, ThumbnailSprite
 @docs HlsInternalMsg, DashInternalMsg, ThumbnailInternalMsg
 
 # TEA
@@ -40,6 +55,9 @@ and `view` renders the HTML.
 
 # Accessors
 @docs currentTime, duration, paused, buffered, currentQuality, availableQualities, captionTracks
+@docs controlsVisible, lastError, remoteAvailable, hasError
+@docs isLive, isFullscreen, isPip, isCompact, activeMenu
+@docs thumbnailDataUrl, thumbnailCapturing
 
 -}
 
@@ -53,11 +71,14 @@ import Hls
 import Html
 import Html.Attributes as Attr
 import Html.Events as Events
+import Http
 import Json.Decode as Decode
 import Json.Encode
 import List
 import Maybe
 import Media
+import Media.Capture
+import Media.RemotePlayback
 import Media.Track
 import Media.Video
 import Observer.Intersection
@@ -99,12 +120,23 @@ type alias StateRecord =
     , seekHovering : Bool
     , thumbnailTime : Float
     , thumbnailPosition : Float
+    , thumbnailDataUrl : Maybe String
+    , thumbnailCapturing : Bool
+    , thumbnailSprites : List ThumbnailSprite
     , isCompact : Bool
     , activeMenu : Maybe String
     , tracksDiscovered : Bool
     , isLive : Bool
     , hasError : Bool
     , lastError : Maybe Media.Error
+    , customErrorMsg : Maybe String
+    , remoteAvailable : Bool
+    , chapters : List ChapterCue
+    , touchStartX : Maybe Float
+    , touchStartY : Maybe Float
+    , firstFrameEmitted : Bool
+    , wasBuffering : Bool
+    , lastProgressPct : Int
     }
 
 
@@ -120,6 +152,38 @@ type alias QualityLevel =
     , bitrate : Int
     , width : Int
     , height : Int
+    }
+
+
+{-| A chapter cue extracted from a chapters text track.
+
+  - `startTime` — chapter start time in seconds.
+  - `endTime` — chapter end time in seconds.
+  - `title` — chapter title from the cue text.
+
+-}
+type alias ChapterCue =
+    { startTime : Float
+    , endTime : Float
+    , title : String
+    }
+
+
+{-| A single sprite entry from a WebVTT thumbnail sprite sheet.
+
+  - `startTime` / `endTime` — the video time range this sprite covers.
+  - `url` — URL of the sprite image.
+  - `x`, `y`, `w`, `h` — pixel region within the sprite image.
+
+-}
+type alias ThumbnailSprite =
+    { startTime : Float
+    , endTime : Float
+    , url : String
+    , x : Int
+    , y : Int
+    , w : Int
+    , h : Int
     }
 
 
@@ -167,6 +231,20 @@ type Msg
     | DashMsg DashInternalMsg
       -- Thumbnail preview
     | ThumbnailMsg ThumbnailInternalMsg
+      -- Fullscreen / PiP state sync
+    | SyncFullscreenState
+    | GotFullscreenChange Bool
+    | GotPipChange Bool
+      -- Remote playback availability
+    | GotRemoteAvailability Bool
+      -- Thumbnail frame capture
+    | GotThumbnailFrame (Result Media.Error String)
+    | GotThumbnailSprites (Result Http.Error (List ThumbnailSprite))
+      -- Chapter cues
+    | GotChapterCues (Result Media.Error (List Media.Track.Cue))
+      -- Touch gestures
+    | TouchStart Float Float
+    | TouchEnd Float Float
 
 
 {-| Internal HLS messages. -}
@@ -201,6 +279,12 @@ type OutMsg
     | QualityLevelsLoaded (List QualityLevel)
     | Ended
     | RemotePlaybackRequested
+    | FirstFrameReady
+    | Rebuffering
+    | BufferingResolved
+    | QualityChanged QualityLevel
+    | ChapterChanged (Maybe ChapterCue)
+    | PlaybackProgress Float
 
 
 
@@ -215,6 +299,11 @@ hideControlsConfig =
         , onEmit = \_ -> HideControls
         , toMsg = HideControlsDebounce
         }
+
+
+progressMilestones : List Int
+progressMilestones =
+    [ 1, 25, 50, 75, 95, 100 ]
 
 
 
@@ -262,15 +351,26 @@ init config =
                 , seekHovering = False
                 , thumbnailTime = 0
                 , thumbnailPosition = 0
+                , thumbnailDataUrl = Nothing
+                , thumbnailCapturing = False
+                , thumbnailSprites = []
                 , isCompact = False
                 , activeMenu = Nothing
                 , tracksDiscovered = False
                 , isLive = False
                 , hasError = False
                 , lastError = Nothing
+                , customErrorMsg = Nothing
+                , remoteAvailable = False
+                , chapters = []
+                , touchStartX = Nothing
+                , touchStartY = Nothing
+                , firstFrameEmitted = False
+                , wasBuffering = False
+                , lastProgressPct = 0
                 }
 
-        initCmd =
+        streamingCmd =
             case config.source of
                 Plain _ _ ->
                     Cmd.none
@@ -298,8 +398,26 @@ init config =
                                     DashMsg (DashError "Failed to create dash.js instance")
                         )
                         Dash.create
+
+        remoteCmd =
+            Media.RemotePlayback.watchRemoteAvailability config.mediaId GotRemoteAvailability
+
+        spriteCmd =
+            case config.thumbnailVttUrl of
+                Nothing ->
+                    Cmd.none
+
+                Just url ->
+                    Http.get
+                        { url = url
+                        , expect =
+                            Http.expectString
+                                (\result ->
+                                    GotThumbnailSprites (Result.map parseSpriteVtt result)
+                                )
+                        }
     in
-    ( initialState, initCmd )
+    ( initialState, Cmd.batch [ streamingCmd, remoteCmd, spriteCmd ] )
 
 
 
@@ -338,7 +456,7 @@ subscriptions config _ =
 
 Handle a `Video.Msg` and return the updated state, any commands, and
 an optional `OutMsg` for significant events (errors, quality changes,
-remote playback requests).
+remote playback requests, analytics milestones).
 
 -}
 update : Config -> Msg -> State -> ( State, Cmd Msg, Maybe OutMsg )
@@ -346,16 +464,69 @@ update config msg (State s) =
     case msg of
         GotMediaState mediaState ->
             let
+                isNewError =
+                    s.mediaState.error == Nothing && mediaState.error /= Nothing
+
+                isFirstFrame =
+                    not s.firstFrameEmitted
+                        && mediaState.readyState == Media.HaveEnoughData
+
+                nowBuffering =
+                    not mediaState.paused
+                        && (mediaState.readyState == Media.HaveFutureData
+                                || mediaState.readyState == Media.HaveCurrentData
+                           )
+
+                rebufferingStarted =
+                    nowBuffering && not s.wasBuffering
+
+                rebufferingResolved =
+                    not nowBuffering && s.wasBuffering
+
+                currentPct =
+                    if mediaState.duration > 0 then
+                        floor (mediaState.currentTime / mediaState.duration * 100)
+                    else
+                        0
+
+                nextMilestone =
+                    List.filter
+                        (\m -> m > s.lastProgressPct && m <= currentPct)
+                        progressMilestones
+                        |> List.head
+
+                newLastProgressPct =
+                    Maybe.withDefault s.lastProgressPct
+                        (Maybe.map (\_ -> currentPct) nextMilestone)
+
+                prevChapter =
+                    activeChapterAt s.mediaState.currentTime s.chapters
+
+                currentChapter =
+                    activeChapterAt mediaState.currentTime s.chapters
+
+                chapterChanged =
+                    prevChapter /= currentChapter
+
+                analyticsOutMsg =
+                    if isFirstFrame then
+                        Just FirstFrameReady
+                    else if rebufferingStarted then
+                        Just Rebuffering
+                    else if rebufferingResolved then
+                        Just BufferingResolved
+                    else if chapterChanged then
+                        Just (ChapterChanged currentChapter)
+                    else
+                        Maybe.map (\m -> PlaybackProgress (toFloat m / 100)) nextMilestone
+
                 outMsg =
                     if mediaState.ended then
                         Just Ended
+                    else if isNewError then
+                        Maybe.map PlaybackError mediaState.error
                     else
-                        case ( s.mediaState.error, mediaState.error ) of
-                            ( Nothing, Just err ) ->
-                                Just (PlaybackError err)
-
-                            _ ->
-                                Nothing
+                        analyticsOutMsg
 
                 shouldDiscoverTracks =
                     not s.tracksDiscovered
@@ -378,6 +549,9 @@ update config msg (State s) =
                     , tracksDiscovered = s.tracksDiscovered || shouldDiscoverTracks
                     , hasError = mediaState.error /= Nothing
                     , lastError = mediaState.error
+                    , firstFrameEmitted = s.firstFrameEmitted || isFirstFrame
+                    , wasBuffering = nowBuffering
+                    , lastProgressPct = newLastProgressPct
                 }
             , trackCmd
             , outMsg
@@ -401,7 +575,7 @@ update config msg (State s) =
             ( State s, Media.seek config.mediaId time, Nothing )
 
         SetVolume vol ->
-            ( State s, Media.setVolume config.mediaId vol, Nothing )
+            ( State s, Media.setVolume config.mediaId (max 0 (min 1 vol)), Nothing )
 
         ToggleMute ->
             ( State s
@@ -413,13 +587,47 @@ update config msg (State s) =
             ( State { s | activeMenu = Nothing }, Media.setPlaybackRate config.mediaId rate, Nothing )
 
         ToggleFullscreen ->
-            ( State { s | isFullscreen = not s.isFullscreen }, Cmd.none, Nothing )
+            let
+                cmd =
+                    if s.isFullscreen then
+                        Media.Video.exitFullscreen
+                    else
+                        Media.Video.requestFullscreen config.mediaId
+            in
+            ( State s, cmd, Nothing )
 
         TogglePip ->
-            ( State { s | isPip = not s.isPip }, Cmd.none, Nothing )
+            let
+                cmd =
+                    if s.isPip then
+                        Task.attempt
+                            (\result ->
+                                GotPipChange
+                                    (case result of
+                                        Ok _ -> False
+                                        Err _ -> s.isPip
+                                    )
+                            )
+                            Media.Video.exitPictureInPicture
+                    else
+                        Task.attempt
+                            (\result ->
+                                GotPipChange
+                                    (case result of
+                                        Ok _ -> True
+                                        Err _ -> s.isPip
+                                    )
+                            )
+                            (Media.Video.enterPictureInPicture config.mediaId)
+            in
+            ( State s, cmd, Nothing )
 
         ToggleRemotePlayback ->
-            ( State s, Cmd.none, Just RemotePlaybackRequested )
+            ( State s
+            , Task.attempt (\_ -> ControlsActivity)
+                (Media.RemotePlayback.prompt config.mediaId)
+            , Just RemotePlaybackRequested
+            )
 
         SetQuality index ->
             let
@@ -505,10 +713,16 @@ update config msg (State s) =
                                     )
                                 |> Maybe.withDefault Cmd.none
 
-                        Dash _ _ ->
-                            Media.load config.mediaId
+                        Dash url _ ->
+                            case s.dashId of
+                                Just dashId ->
+                                    Task.attempt (\_ -> ControlsActivity)
+                                        (Dash.initialize dashId config.mediaId url False)
+
+                                Nothing ->
+                                    Media.load config.mediaId
             in
-            ( State { s | hasError = False, lastError = Nothing }, cmd, Nothing )
+            ( State { s | hasError = False, lastError = Nothing, customErrorMsg = Nothing }, cmd, Nothing )
 
         GotTrackInfo result ->
             let
@@ -517,9 +731,23 @@ update config msg (State s) =
 
                 tracks =
                     convertTrackInfos trackInfos
+
+                chaptersCmd =
+                    trackInfos
+                        |> List.filter
+                            (\info ->
+                                Media.Track.trackKindToString info.kind == "chapters"
+                            )
+                        |> List.head
+                        |> Maybe.map
+                            (\info ->
+                                Task.attempt GotChapterCues
+                                    (Media.Track.getActiveCues config.mediaId info.index)
+                            )
+                        |> Maybe.withDefault Cmd.none
             in
             ( State { s | captionTrackInfos = trackInfos, captionTracks = tracks }
-            , Cmd.none
+            , chaptersCmd
             , Nothing
             )
 
@@ -573,8 +801,8 @@ update config msg (State s) =
             in
             ( State s, cmd, Nothing )
 
-        GotIsLive isLive ->
-            ( State { s | isLive = isLive }, Cmd.none, Nothing )
+        GotIsLive live ->
+            ( State { s | isLive = live }, Cmd.none, Nothing )
 
         HlsMsg hlsMsg ->
             updateHls config hlsMsg s
@@ -583,7 +811,54 @@ update config msg (State s) =
             updateDash config dashMsg s
 
         ThumbnailMsg thumbMsg ->
-            updateThumbnail thumbMsg s
+            updateThumbnail config thumbMsg s
+
+        SyncFullscreenState ->
+            ( State s
+            , Task.perform GotFullscreenChange Media.Video.isFullscreen
+            , Nothing
+            )
+
+        GotFullscreenChange isFs ->
+            ( State { s | isFullscreen = isFs }, Cmd.none, Nothing )
+
+        GotPipChange active ->
+            ( State { s | isPip = active }, Cmd.none, Nothing )
+
+        GotRemoteAvailability available ->
+            ( State { s | remoteAvailable = available }, Cmd.none, Nothing )
+
+        GotThumbnailFrame result ->
+            ( State
+                { s
+                    | thumbnailDataUrl = Result.toMaybe result
+                    , thumbnailCapturing = False
+                }
+            , Cmd.none
+            , Nothing
+            )
+
+        GotThumbnailSprites result ->
+            ( State { s | thumbnailSprites = Result.withDefault [] result }
+            , Cmd.none
+            , Nothing
+            )
+
+        GotChapterCues result ->
+            let
+                cues =
+                    Result.withDefault [] result
+
+                chapters =
+                    List.map cueToChapter cues
+            in
+            ( State { s | chapters = chapters }, Cmd.none, Nothing )
+
+        TouchStart x y ->
+            ( State { s | touchStartX = Just x, touchStartY = Just y }, Cmd.none, Nothing )
+
+        TouchEnd x y ->
+            handleTouchEnd config x y s
 
 
 enableCaptionTrack : Config -> Int -> StateRecord -> ( State, Cmd Msg, Maybe OutMsg )
@@ -591,6 +866,14 @@ enableCaptionTrack config n s =
     let
         maybeInfo =
             List.drop n s.captionTrackInfos |> List.head
+
+        clearCmd =
+            case s.activeCaptionTrackIndex of
+                Just idx ->
+                    Media.Track.clearCueChangeHandler config.mediaId idx
+
+                Nothing ->
+                    Cmd.none
 
         enableCmd =
             maybeInfo
@@ -625,7 +908,7 @@ enableCaptionTrack config n s =
             , activeCues = []
             , activeMenu = Nothing
         }
-    , Cmd.batch [ enableCmd, handlerCmd ]
+    , Cmd.batch [ clearCmd, enableCmd, handlerCmd ]
     , Nothing
     )
 
@@ -729,16 +1012,42 @@ handleKeyDown config key s =
             )
 
         "f" ->
-            ( State { s | isFullscreen = not s.isFullscreen }, Cmd.none, Nothing )
+            ( State s
+            , if s.isFullscreen then
+                Media.Video.exitFullscreen
+              else
+                Media.Video.requestFullscreen config.mediaId
+            , Nothing
+            )
 
         "F" ->
-            ( State { s | isFullscreen = not s.isFullscreen }, Cmd.none, Nothing )
+            ( State s
+            , if s.isFullscreen then
+                Media.Video.exitFullscreen
+              else
+                Media.Video.requestFullscreen config.mediaId
+            , Nothing
+            )
 
         "p" ->
-            ( State { s | isPip = not s.isPip }, Cmd.none, Nothing )
+            ( State s
+            , if s.isPip then
+                Task.attempt (\_ -> GotPipChange False) Media.Video.exitPictureInPicture
+              else
+                Task.attempt (\_ -> GotPipChange True)
+                    (Media.Video.enterPictureInPicture config.mediaId)
+            , Nothing
+            )
 
         "P" ->
-            ( State { s | isPip = not s.isPip }, Cmd.none, Nothing )
+            ( State s
+            , if s.isPip then
+                Task.attempt (\_ -> GotPipChange False) Media.Video.exitPictureInPicture
+              else
+                Task.attempt (\_ -> GotPipChange True)
+                    (Media.Video.enterPictureInPicture config.mediaId)
+            , Nothing
+            )
 
         "c" ->
             disableCaptionTrack config s
@@ -782,6 +1091,68 @@ handleKeyDown config key s =
                             )
             in
             ( State s, Maybe.withDefault Cmd.none digitSeek, Nothing )
+
+
+handleTouchEnd : Config -> Float -> Float -> StateRecord -> ( State, Cmd Msg, Maybe OutMsg )
+handleTouchEnd config x y s =
+    let
+        cleared =
+            { s | touchStartX = Nothing, touchStartY = Nothing }
+    in
+    case ( s.touchStartX, s.touchStartY ) of
+        ( Just startX, Just startY ) ->
+            let
+                dx =
+                    x - startX
+
+                dy =
+                    y - startY
+            in
+            if abs dx < 10 && abs dy < 10 then
+                -- Tap: toggle play/pause
+                let
+                    playCmd =
+                        if s.mediaState.paused then
+                            Task.attempt (\_ -> GotMediaState s.mediaState)
+                                (Media.play config.mediaId)
+                        else
+                            Media.pause config.mediaId
+                in
+                ( State cleared, playCmd, Nothing )
+
+            else if dx < -20 then
+                -- Swipe left: seek back 10s
+                ( State cleared
+                , Media.seek config.mediaId (max 0 (s.mediaState.currentTime - 10))
+                , Nothing
+                )
+
+            else if dx > 20 then
+                -- Swipe right: seek forward 10s
+                ( State cleared
+                , Media.seek config.mediaId (min s.mediaState.duration (s.mediaState.currentTime + 10))
+                , Nothing
+                )
+
+            else if dy < -20 then
+                -- Swipe up: volume up
+                ( State cleared
+                , Media.setVolume config.mediaId (min 1 (s.mediaState.volume + 0.1))
+                , Nothing
+                )
+
+            else if dy > 20 then
+                -- Swipe down: volume down
+                ( State cleared
+                , Media.setVolume config.mediaId (max 0 (s.mediaState.volume - 0.1))
+                , Nothing
+                )
+
+            else
+                ( State cleared, Cmd.none, Nothing )
+
+        _ ->
+            ( State { s | touchStartX = Nothing, touchStartY = Nothing }, Cmd.none, Nothing )
 
 
 updateHls : Config -> HlsInternalMsg -> StateRecord -> ( State, Cmd Msg, Maybe OutMsg )
@@ -840,7 +1211,16 @@ updateHls config hlsMsg s =
             ( State { s | availableQualities = qualities }, Cmd.none, outMsg )
 
         HlsLevelSwitched level ->
-            ( State { s | currentQualityIndex = level.index }, Cmd.none, Nothing )
+            let
+                newIndex =
+                    level.index
+
+                outMsg =
+                    List.filter (\q -> q.index == newIndex) s.availableQualities
+                        |> List.head
+                        |> Maybe.map QualityChanged
+            in
+            ( State { s | currentQualityIndex = newIndex }, Cmd.none, outMsg )
 
         HlsError _ isFatal ->
             ( State s
@@ -934,26 +1314,72 @@ updateDash config dashMsg s =
             )
 
         DashRepresentationSwitched repr ->
-            ( State { s | currentQualityIndex = repr.index }, Cmd.none, Nothing )
+            let
+                newIndex =
+                    repr.index
 
-        DashError _ ->
-            ( State s, Cmd.none, Just (PlaybackError Media.NetworkError) )
+                outMsg =
+                    List.filter (\q -> q.index == newIndex) s.availableQualities
+                        |> List.head
+                        |> Maybe.map QualityChanged
+            in
+            ( State { s | currentQualityIndex = newIndex }, Cmd.none, outMsg )
+
+        DashError errMsg ->
+            let
+                errLower =
+                    String.toLower errMsg
+
+                isDrmError =
+                    String.contains "license" errLower
+                        || String.contains "key" errLower
+                        || String.contains "drm" errLower
+                        || String.contains "protection" errLower
+
+                errorText =
+                    if isDrmError then
+                        "DRM license acquisition failed. Check your connection and try again."
+                    else
+                        "Playback error"
+            in
+            ( State
+                { s
+                    | hasError = True
+                    , lastError = Just Media.NetworkError
+                    , customErrorMsg = Just errorText
+                }
+            , Cmd.none
+            , Just (PlaybackError Media.NetworkError)
+            )
 
         DashStreamInitialized ->
             ( State s, Cmd.none, Just Ready )
 
 
-updateThumbnail : ThumbnailInternalMsg -> StateRecord -> ( State, Cmd Msg, Maybe OutMsg )
-updateThumbnail thumbMsg s =
+updateThumbnail : Config -> ThumbnailInternalMsg -> StateRecord -> ( State, Cmd Msg, Maybe OutMsg )
+updateThumbnail config thumbMsg s =
     case thumbMsg of
         ThumbnailHoverAt time position ->
+            let
+                shouldCapture =
+                    not s.thumbnailCapturing && List.isEmpty s.thumbnailSprites
+
+                captureCmd =
+                    if shouldCapture then
+                        Task.attempt GotThumbnailFrame
+                            (Media.Capture.captureFrameAt config.mediaId time)
+                    else
+                        Cmd.none
+            in
             ( State
                 { s
                     | seekHovering = True
                     , thumbnailTime = time
                     , thumbnailPosition = position
+                    -- True when a live capture is in-flight (no sprites); False when using sprites
+                    , thumbnailCapturing = s.thumbnailCapturing || shouldCapture
                 }
-            , Cmd.none
+            , captureCmd
             , Nothing
             )
 
@@ -1001,6 +1427,15 @@ view config (State s) =
                     , ( "--video-progress-fill", "#ff0000" )
                     , ( "--video-progress-thumb", "#ffffff" )
                     , ( "--video-loaded-fill", "rgba(255,255,255,0.4)" )
+                    , ( "--video-controls-bg-gradient", "rgba(0,0,0,0.75)" )
+                    , ( "--video-error-bg", "rgba(0,0,0,0.85)" )
+                    , ( "--video-error-fg", "#ffffff" )
+                    , ( "--video-spinner-color", "rgba(255,255,255,0.8)" )
+                    , ( "--video-live-bg", "#cc0000" )
+                    , ( "--video-live-fg", "#ffffff" )
+                    , ( "--video-cue-bg", "rgba(0,0,0,0.8)" )
+                    , ( "--video-cue-fg", "#ffffff" )
+                    , ( "--video-thumb-bg", "rgba(0,0,0,0.85)" )
                     ]
 
                 Dark ->
@@ -1009,6 +1444,15 @@ view config (State s) =
                     , ( "--video-progress-fill", "#0066ff" )
                     , ( "--video-progress-thumb", "#1a1a1a" )
                     , ( "--video-loaded-fill", "rgba(0,0,0,0.25)" )
+                    , ( "--video-controls-bg-gradient", "rgba(255,255,255,0.2)" )
+                    , ( "--video-error-bg", "rgba(255,255,255,0.9)" )
+                    , ( "--video-error-fg", "#1a1a1a" )
+                    , ( "--video-spinner-color", "rgba(0,0,0,0.6)" )
+                    , ( "--video-live-bg", "#0044cc" )
+                    , ( "--video-live-fg", "#ffffff" )
+                    , ( "--video-cue-bg", "rgba(255,255,255,0.85)" )
+                    , ( "--video-cue-fg", "#1a1a1a" )
+                    , ( "--video-thumb-bg", "rgba(255,255,255,0.9)" )
                     ]
 
                 Custom vars ->
@@ -1017,12 +1461,29 @@ view config (State s) =
                     , ( "--video-progress-fill", vars.progressFill )
                     , ( "--video-progress-thumb", vars.progressThumb )
                     , ( "--video-loaded-fill", vars.loadedFill )
+                    , ( "--video-controls-bg-gradient", vars.controlsBgGradient )
+                    , ( "--video-error-bg", vars.errorBg )
+                    , ( "--video-error-fg", vars.errorFg )
+                    , ( "--video-spinner-color", vars.spinnerColor )
+                    , ( "--video-live-bg", vars.liveBg )
+                    , ( "--video-live-fg", vars.liveFg )
+                    , ( "--video-cue-bg", vars.cueBg )
+                    , ( "--video-cue-fg", vars.cueFg )
+                    , ( "--video-thumb-bg", vars.thumbBg )
                     ]
 
         keyboardAttrs =
             if config.keyboardShortcuts then
                 [ Events.on "keydown"
                     (Decode.map KeyDown (Decode.field "key" Decode.string))
+                ]
+            else
+                []
+
+        touchAttrs =
+            if config.enableTouchGestures then
+                [ Events.on "touchstart" touchStartDecoder
+                , Events.on "touchend" touchEndDecoder
                 ]
             else
                 []
@@ -1041,8 +1502,8 @@ view config (State s) =
          , Attr.attribute "tabindex" "0"
          , Events.onMouseEnter ShowControls
          , Events.onMouseLeave HideControls
-         , Events.onMouseOver ControlsActivity
-         ] ++ keyboardAttrs)
+         , Events.on "mousemove" (Decode.succeed ControlsActivity)
+         ] ++ keyboardAttrs ++ touchAttrs)
         [ -- Inject keyframe rule for the buffering spinner animation.
           Html.node "style" []
             [ Html.text
@@ -1161,6 +1622,7 @@ videoElement config s =
          , Attr.property "muted" (Json.Encode.bool config.muted)
          , Attr.property "loop" (Json.Encode.bool config.loop)
          , Attr.attribute "preload" (Media.preloadToString config.preload)
+         , Media.Video.onFullscreenChange SyncFullscreenState
          , Events.on "timeupdate" stateDecoder
          , Events.on "loadedmetadata" stateDecoder
          , Events.on "play" stateDecoder
@@ -1251,7 +1713,7 @@ bufferingSpinner s =
                 , Attr.attribute "cy" "24"
                 , Attr.attribute "r" "20"
                 , Attr.attribute "fill" "none"
-                , Attr.attribute "stroke" "rgba(255,255,255,0.8)"
+                , Attr.attribute "stroke" "var(--video-spinner-color, rgba(255,255,255,0.8))"
                 , Attr.attribute "stroke-width" "4"
                 , Attr.attribute "stroke-dasharray" "80"
                 , Attr.attribute "stroke-dashoffset" "20"
@@ -1268,9 +1730,14 @@ errorOverlay s =
     else
         let
             errorText =
-                s.lastError
-                    |> Maybe.map Media.errorToString
-                    |> Maybe.withDefault "An unknown error occurred"
+                case s.customErrorMsg of
+                    Just msg ->
+                        msg
+
+                    Nothing ->
+                        s.lastError
+                            |> Maybe.map Media.errorToString
+                            |> Maybe.withDefault "An unknown error occurred"
         in
         Html.div
             [ Css.inlineStyle
@@ -1283,8 +1750,8 @@ errorOverlay s =
                 , Css.flexDirection Css.Value.column
                 , Css.alignItems Css.Value.center
                 , Css.justifyContent Css.Value.center
-                , Css.backgroundColor (Css.Value.rgba 0 0 0 0.85)
-                , Css.color (Css.Value.hex "#ffffff")
+                , Css.property "background-color" "var(--video-error-bg, rgba(0,0,0,0.85))"
+                , Css.property "color" "var(--video-error-fg, #ffffff)"
                 , Css.zIndex (Css.Value.int_ 50)
                 ]
             ]
@@ -1334,7 +1801,7 @@ errorOverlay s =
                     , Css.backgroundColor (Css.Value.rgba 255 255 255 0.15)
                     , Css.property "border" "1px solid rgba(255,255,255,0.3)"
                     , Css.borderRadius (Css.Value.px 4)
-                    , Css.color (Css.Value.hex "#ffffff")
+                    , Css.property "color" "var(--video-error-fg, #ffffff)"
                     , Css.cursor Css.Value.pointer
                     , Css.fontSize (Css.Value.rem 0.875)
                     ]
@@ -1354,7 +1821,7 @@ controlsBar config s =
             , Css.left Css.Value.zero
             , Css.right Css.Value.zero
             , Css.property "background"
-                "linear-gradient(to top, rgba(0,0,0,0.75), transparent)"
+                "linear-gradient(to top, var(--video-controls-bg-gradient, rgba(0,0,0,0.75)), transparent)"
             , Css.property "color" "var(--video-controls-fg, #ffffff)"
             , Css.opacity (Css.Value.num (if s.controlsVisible then 1.0 else 0.0))
             , Css.pointerEvents
@@ -1369,6 +1836,7 @@ controlsBar config s =
             { time = s.thumbnailTime
             , position = s.thumbnailPosition
             , visible = s.seekHovering
+            , thumbnailDataUrl = s.thumbnailDataUrl
             }
         , -- Live badge + seek bar row
           Html.div
@@ -1472,7 +1940,9 @@ controlsBar config s =
               else
                 Html.text ""
             , Video.Controls.remoteButton
-                { onToggle = ToggleRemotePlayback }
+                { onToggle = ToggleRemotePlayback
+                , remoteAvailable = s.remoteAvailable
+                }
             , Video.Controls.fullscreenButton
                 { onToggle = ToggleFullscreen
                 , isFullscreen = s.isFullscreen
@@ -1485,8 +1955,8 @@ liveBadge : Html.Html msg
 liveBadge =
     Html.div
         [ Css.inlineStyle
-            [ Css.backgroundColor (Css.Value.hex "#cc0000")
-            , Css.color (Css.Value.hex "#ffffff")
+            [ Css.property "background-color" "var(--video-live-bg, #cc0000)"
+            , Css.property "color" "var(--video-live-fg, #ffffff)"
             , Css.fontSize (Css.Value.rem 0.6875)
             , Css.fontFamily [ "monospace" ]
             , Css.property "font-weight" "bold"
@@ -1559,6 +2029,147 @@ convertTrackInfos infos =
         infos
 
 
+cueToChapter : Media.Track.Cue -> ChapterCue
+cueToChapter cue =
+    { startTime = cue.startTime
+    , endTime = cue.endTime
+    , title = cue.text
+    }
+
+
+activeChapterAt : Float -> List ChapterCue -> Maybe ChapterCue
+activeChapterAt t chapters =
+    List.filter (\c -> c.startTime <= t && t < c.endTime) chapters
+        |> List.head
+
+
+touchStartDecoder : Decode.Decoder Msg
+touchStartDecoder =
+    Decode.map2 TouchStart
+        (Decode.at [ "changedTouches", "0", "clientX" ] Decode.float)
+        (Decode.at [ "changedTouches", "0", "clientY" ] Decode.float)
+
+
+touchEndDecoder : Decode.Decoder Msg
+touchEndDecoder =
+    Decode.map2 TouchEnd
+        (Decode.at [ "changedTouches", "0", "clientX" ] Decode.float)
+        (Decode.at [ "changedTouches", "0", "clientY" ] Decode.float)
+
+
+{-| Parse a WebVTT sprite sheet into a list of ThumbnailSprite records.
+
+Each non-header cue block should have an image URL with an `#xywh=x,y,w,h`
+fragment identifying the sprite region.
+
+-}
+parseSpriteVtt : String -> List ThumbnailSprite
+parseSpriteVtt content =
+    content
+        |> String.split "\n\n"
+        |> List.filterMap parseSpriteBlock
+
+
+parseSpriteBlock : String -> Maybe ThumbnailSprite
+parseSpriteBlock block =
+    let
+        nonEmpty =
+            block
+                |> String.split "\n"
+                |> List.map String.trim
+                |> List.filter (not << String.isEmpty)
+                |> List.filter (\l -> l /= "WEBVTT")
+
+        timeLineMaybe =
+            List.filter (String.contains "-->") nonEmpty |> List.head
+
+        imageLineMaybe =
+            List.filter (not << String.contains "-->") nonEmpty |> List.head
+    in
+    Maybe.andThen
+        (\timeLine ->
+            Maybe.andThen
+                (parseSpriteTimesAndImage timeLine)
+                imageLineMaybe
+        )
+        timeLineMaybe
+
+
+parseSpriteTimesAndImage : String -> String -> Maybe ThumbnailSprite
+parseSpriteTimesAndImage timeLine imageLine =
+    let
+        timeParts =
+            String.split " --> " timeLine
+
+        startMaybe =
+            List.head timeParts |> Maybe.map parseVttTime
+
+        endMaybe =
+            List.drop 1 timeParts |> List.head |> Maybe.map parseVttTime
+    in
+    Maybe.andThen
+        (\start ->
+            Maybe.andThen
+                (\end -> parseSpriteImage start end imageLine)
+                endMaybe
+        )
+        startMaybe
+
+
+parseSpriteImage : Float -> Float -> String -> Maybe ThumbnailSprite
+parseSpriteImage startTime endTime imageLine =
+    case String.split "#xywh=" imageLine of
+        [ url, xywhStr ] ->
+            case List.filterMap String.toInt (String.split "," xywhStr) of
+                [ x, y, w, h ] ->
+                    Just
+                        { startTime = startTime
+                        , endTime = endTime
+                        , url = url
+                        , x = x
+                        , y = y
+                        , w = w
+                        , h = h
+                        }
+
+                _ ->
+                    Nothing
+
+        _ ->
+            Nothing
+
+
+parseVttTime : String -> Float
+parseVttTime timeStr =
+    let
+        msPart =
+            String.split "." timeStr
+                |> List.drop 1
+                |> List.head
+                |> Maybe.andThen String.toFloat
+                |> Maybe.withDefault 0
+                |> (\v -> v / 1000)
+
+        withoutMs =
+            String.split "." timeStr
+                |> List.head
+                |> Maybe.withDefault timeStr
+
+        timeParts =
+            String.split ":" withoutMs
+                |> List.filterMap String.toInt
+    in
+    case timeParts of
+        [ h, m, sec ] ->
+            toFloat (h * 3600 + m * 60 + sec) + msPart
+
+        [ m, sec ] ->
+            toFloat (m * 60 + sec) + msPart
+
+        _ ->
+            0
+
+
 
 -- ACCESSORS
 
@@ -1612,3 +2223,70 @@ availableQualities (State s) =
 captionTracks : State -> List Video.Caption.Track
 captionTracks (State s) =
     s.captionTracks
+
+
+{-| Whether the controls bar is currently visible. -}
+controlsVisible : State -> Bool
+controlsVisible (State s) =
+    s.controlsVisible
+
+
+{-| The last playback error, if any. -}
+lastError : State -> Maybe Media.Error
+lastError (State s) =
+    s.lastError
+
+
+{-| Whether remote playback (Chromecast / AirPlay) is available on this device. -}
+remoteAvailable : State -> Bool
+remoteAvailable (State s) =
+    s.remoteAvailable
+
+
+{-| Whether a playback error is currently displayed. -}
+hasError : State -> Bool
+hasError (State s) =
+    s.hasError
+
+
+{-| Whether the current source is a live stream. -}
+isLive : State -> Bool
+isLive (State s) =
+    s.isLive
+
+
+{-| Whether the player is currently in fullscreen mode. -}
+isFullscreen : State -> Bool
+isFullscreen (State s) =
+    s.isFullscreen
+
+
+{-| Whether the player is currently in Picture-in-Picture mode. -}
+isPip : State -> Bool
+isPip (State s) =
+    s.isPip
+
+
+{-| Whether the player is in compact mode (container width < 480 px). -}
+isCompact : State -> Bool
+isCompact (State s) =
+    s.isCompact
+
+
+{-| The currently open dropdown menu name, or Nothing when all menus are closed. -}
+activeMenu : State -> Maybe String
+activeMenu (State s) =
+    s.activeMenu
+
+
+{-| The data URL of the most recently captured thumbnail frame, or Nothing
+while a capture is pending or no hover is active. -}
+thumbnailDataUrl : State -> Maybe String
+thumbnailDataUrl (State s) =
+    s.thumbnailDataUrl
+
+
+{-| Whether a thumbnail frame capture is currently in-flight. -}
+thumbnailCapturing : State -> Bool
+thumbnailCapturing (State s) =
+    s.thumbnailCapturing

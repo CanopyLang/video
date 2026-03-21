@@ -41,6 +41,7 @@ suite =
         , dashInternalMsgTests
         , thumbnailInternalMsgTests
         , subscriptionsTests
+        , updateTests
         ]
 
 
@@ -1118,4 +1119,227 @@ subscriptionsTests =
                     isSubMsg _ = True
                 in
                 Expect.equal True (isSubMsg (Video.subscriptions cfg state))
+        ]
+
+
+
+-- UPDATE BEHAVIOR
+
+
+updateTests : Test
+updateTests =
+    let
+        cfg =
+            Video.Config.defaultConfig
+                (Media.id "update-test")
+                (Video.Source.plain "https://example.com/v.mp4")
+
+        initState =
+            Tuple.first (Video.init cfg)
+
+        run msg =
+            Video.update cfg msg initState
+    in
+    describe "update behavior"
+        [ test "OpenMenu quality sets activeMenu to Just quality" <|
+            \_ ->
+                let
+                    ( state, _, _ ) = run (Video.OpenMenu "quality")
+                in
+                Expect.equal (Just "quality") (Video.activeMenu state)
+
+        , test "OpenMenu speed sets activeMenu to Just speed" <|
+            \_ ->
+                let
+                    ( state, _, _ ) = run (Video.OpenMenu "speed")
+                in
+                Expect.equal (Just "speed") (Video.activeMenu state)
+
+        , test "OpenMenu replaces previously open menu" <|
+            \_ ->
+                let
+                    ( state1, _, _ ) = run (Video.OpenMenu "quality")
+                    ( state2, _, _ ) = Video.update cfg (Video.OpenMenu "speed") state1
+                in
+                Expect.equal (Just "speed") (Video.activeMenu state2)
+
+        , test "CloseMenu resets activeMenu to Nothing" <|
+            \_ ->
+                let
+                    ( opened, _, _ ) = run (Video.OpenMenu "quality")
+                    ( state, _, _ ) = Video.update cfg Video.CloseMenu opened
+                in
+                Expect.equal Nothing (Video.activeMenu state)
+
+        , test "SetPlaybackRate closes activeMenu" <|
+            \_ ->
+                let
+                    ( opened, _, _ ) = run (Video.OpenMenu "speed")
+                    ( state, _, _ ) = Video.update cfg (Video.SetPlaybackRate 1.5) opened
+                in
+                Expect.equal Nothing (Video.activeMenu state)
+
+        , test "SetQuality closes activeMenu" <|
+            \_ ->
+                let
+                    ( opened, _, _ ) = run (Video.OpenMenu "quality")
+                    ( state, _, _ ) = Video.update cfg (Video.SetQuality 0) opened
+                in
+                Expect.equal Nothing (Video.activeMenu state)
+
+        , test "GotPlayerWidth 400 sets isCompact to True" <|
+            \_ ->
+                let
+                    ( state, _, _ ) = run (Video.GotPlayerWidth 400)
+                in
+                Expect.equal True (Video.isCompact state)
+
+        , test "GotPlayerWidth 600 sets isCompact to False" <|
+            \_ ->
+                let
+                    ( state, _, _ ) = run (Video.GotPlayerWidth 600)
+                in
+                Expect.equal False (Video.isCompact state)
+
+        , test "GotPlayerWidth 480 is not compact (boundary is strictly less than 480)" <|
+            \_ ->
+                let
+                    ( state, _, _ ) = run (Video.GotPlayerWidth 480)
+                in
+                Expect.equal False (Video.isCompact state)
+
+        , test "GotIsLive True sets isLive to True" <|
+            \_ ->
+                let
+                    ( state, _, _ ) = run (Video.GotIsLive True)
+                in
+                Expect.equal True (Video.isLive state)
+
+        , test "GotIsLive False sets isLive to False" <|
+            \_ ->
+                let
+                    ( state, _, _ ) = run (Video.GotIsLive False)
+                in
+                Expect.equal False (Video.isLive state)
+
+        , test "GotFullscreenChange True sets isFullscreen to True" <|
+            \_ ->
+                let
+                    ( state, _, _ ) = run (Video.GotFullscreenChange True)
+                in
+                Expect.equal True (Video.isFullscreen state)
+
+        , test "GotFullscreenChange False sets isFullscreen to False" <|
+            \_ ->
+                let
+                    ( state, _, _ ) = run (Video.GotFullscreenChange False)
+                in
+                Expect.equal False (Video.isFullscreen state)
+
+        , test "GotPipChange True sets isPip to True" <|
+            \_ ->
+                let
+                    ( state, _, _ ) = run (Video.GotPipChange True)
+                in
+                Expect.equal True (Video.isPip state)
+
+        , test "GotPipChange False sets isPip to False" <|
+            \_ ->
+                let
+                    ( state, _, _ ) = run (Video.GotPipChange False)
+                in
+                Expect.equal False (Video.isPip state)
+
+        , test "GotRemoteAvailability True sets remoteAvailable to True" <|
+            \_ ->
+                let
+                    ( state, _, _ ) = run (Video.GotRemoteAvailability True)
+                in
+                Expect.equal True (Video.remoteAvailable state)
+
+        , test "GotRemoteAvailability False sets remoteAvailable to False" <|
+            \_ ->
+                let
+                    ( state, _, _ ) = run (Video.GotRemoteAvailability False)
+                in
+                Expect.equal False (Video.remoteAvailable state)
+
+        , test "GotThumbnailFrame Ok sets thumbnailDataUrl" <|
+            \_ ->
+                let
+                    url = "data:image/png;base64,abc123"
+                    ( state, _, _ ) = run (Video.GotThumbnailFrame (Ok url))
+                in
+                Expect.equal (Just url) (Video.thumbnailDataUrl state)
+
+        , test "GotThumbnailFrame Err sets thumbnailDataUrl to Nothing" <|
+            \_ ->
+                let
+                    ( state, _, _ ) = run (Video.GotThumbnailFrame (Err Media.NetworkError))
+                in
+                Expect.equal Nothing (Video.thumbnailDataUrl state)
+
+        , test "GotThumbnailFrame Err clears thumbnailCapturing flag" <|
+            \_ ->
+                let
+                    ( state, _, _ ) = run (Video.GotThumbnailFrame (Err Media.NetworkError))
+                in
+                Expect.equal False (Video.thumbnailCapturing state)
+
+        , test "ShowControls sets controlsVisible to True" <|
+            \_ ->
+                let
+                    ( hidden, _, _ ) = run Video.HideControls
+                    ( state, _, _ ) = Video.update cfg Video.ShowControls hidden
+                in
+                Expect.equal True (Video.controlsVisible state)
+
+        , test "HideControls sets controlsVisible to False" <|
+            \_ ->
+                let
+                    ( state, _, _ ) = run Video.HideControls
+                in
+                Expect.equal False (Video.controlsVisible state)
+
+        , test "Retry clears hasError" <|
+            \_ ->
+                let
+                    ( state, _, _ ) = run Video.Retry
+                in
+                Expect.equal False (Video.hasError state)
+
+        , test "Retry clears lastError" <|
+            \_ ->
+                let
+                    ( state, _, _ ) = run Video.Retry
+                in
+                Expect.equal Nothing (Video.lastError state)
+
+        , test "ToggleRemotePlayback emits RemotePlaybackRequested OutMsg" <|
+            \_ ->
+                let
+                    ( _, _, outMsg ) = run Video.ToggleRemotePlayback
+                in
+                Expect.equal (Just Video.RemotePlaybackRequested) outMsg
+
+        , test "CloseMenu produces no OutMsg" <|
+            \_ ->
+                let
+                    ( _, _, outMsg ) = run Video.CloseMenu
+                in
+                Expect.equal Nothing outMsg
+
+        , test "GotFullscreenChange produces no OutMsg" <|
+            \_ ->
+                let
+                    ( _, _, outMsg ) = run (Video.GotFullscreenChange True)
+                in
+                Expect.equal Nothing outMsg
+
+        , test "GotRemoteAvailability produces no OutMsg" <|
+            \_ ->
+                let
+                    ( _, _, outMsg ) = run (Video.GotRemoteAvailability True)
+                in
+                Expect.equal Nothing outMsg
         ]

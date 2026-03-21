@@ -10,6 +10,10 @@ when the user hovers over it. The preview position tracks the cursor
 horizontally, and the displayed time corresponds to the seek position
 under the cursor.
 
+When `thumbnailDataUrl` is provided (captured via
+`Media.Capture.captureFrameAt`), an actual video frame is shown.
+Otherwise a dark placeholder is displayed while the capture is in-flight.
+
 # View
 @docs view
 
@@ -19,6 +23,7 @@ under the cursor.
 import Css
 import Css.Value
 import Html
+import Html.Attributes as Attr
 
 
 
@@ -32,20 +37,19 @@ import Html
     bar width. Used to position the thumbnail left-to-right.
   - `visible` — whether the thumbnail is currently shown (typically True
     only while the user is hovering over the seek bar).
-
-Renders a placeholder container with the timestamp label. Host
-applications may augment this with a canvas-drawn frame from
-`Media.Capture.captureFrameAt` or a sprite-sheet thumbnail image.
+  - `thumbnailDataUrl` — a data URL of the captured video frame, or
+    Nothing while the capture is pending.
 
     Video.Thumbnail.view
         { time = 45.5
         , position = 0.38
         , visible = model.seekHovering
+        , thumbnailDataUrl = model.thumbnailDataUrl
         }
 
 -}
-view : { time : Float, position : Float, visible : Bool } -> Html.Html msg
-view { time, position, visible } =
+view : { time : Float, position : Float, visible : Bool, thumbnailDataUrl : Maybe String } -> Html.Html msg
+view { time, position, visible, thumbnailDataUrl } =
     let
         thumbWidthPx =
             120.0
@@ -55,6 +59,34 @@ view { time, position, visible } =
 
         clampedLeft =
             max 0 (min 90 leftPct)
+
+        frameContent =
+            case thumbnailDataUrl of
+                Just url ->
+                    Html.img
+                        [ Attr.src url
+                        , Css.inlineStyle
+                            [ Css.width (Css.Value.px 112)
+                            , Css.height (Css.Value.px 63)
+                            , Css.borderRadius (Css.Value.px 2)
+                            , Css.marginBottom (Css.Value.px 4)
+                            , Css.display Css.Value.block
+                            , Css.property "object-fit" "cover"
+                            ]
+                        ]
+                        []
+
+                Nothing ->
+                    Html.div
+                        [ Css.inlineStyle
+                            [ Css.width (Css.Value.px 112)
+                            , Css.height (Css.Value.px 63)
+                            , Css.property "background-color" "var(--video-thumb-bg, rgba(0,0,0,0.85))"
+                            , Css.borderRadius (Css.Value.px 2)
+                            , Css.marginBottom (Css.Value.px 4)
+                            ]
+                        ]
+                        []
     in
     Html.div
         [ Css.inlineStyle
@@ -62,7 +94,7 @@ view { time, position, visible } =
             , Css.bottom (Css.Value.px 48)
             , Css.left (Css.Value.pct clampedLeft)
             , Css.width (Css.Value.px thumbWidthPx)
-            , Css.backgroundColor (Css.Value.rgba 0 0 0 0.85)
+            , Css.property "background-color" "var(--video-thumb-bg, rgba(0,0,0,0.85))"
             , Css.borderRadius (Css.Value.px 4)
             , Css.padding (Css.Value.px 4)
             , Css.display (if visible then Css.Value.flex_ else Css.Value.none)
@@ -72,19 +104,10 @@ view { time, position, visible } =
             , Css.zIndex (Css.Value.int_ 30)
             ]
         ]
-        [ Html.div
-            [ Css.inlineStyle
-                [ Css.width (Css.Value.px 112)
-                , Css.height (Css.Value.px 63)
-                , Css.backgroundColor (Css.Value.hex "#1a1a1a")
-                , Css.borderRadius (Css.Value.px 2)
-                , Css.marginBottom (Css.Value.px 4)
-                ]
-            ]
-            []
+        [ frameContent
         , Html.span
             [ Css.inlineStyle
-                [ Css.color (Css.Value.hex "#ffffff")
+                [ Css.property "color" "var(--video-cue-fg, #ffffff)"
                 , Css.fontSize (Css.Value.rem 0.75)
                 , Css.fontFamily [ "monospace" ]
                 ]

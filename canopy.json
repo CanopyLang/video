@@ -25,7 +25,8 @@
         "canopy/headless-ui": "1.0.0 <= v < 2.0.0",
         "canopy/keyboard": "1.0.0 <= v < 2.0.0",
         "canopy/debounce-throttle": "1.0.0 <= v < 2.0.0",
-        "canopy/web-apis-observers": "1.0.0 <= v < 2.0.0"
+        "canopy/web-apis-observers": "1.0.0 <= v < 2.0.0",
+        "canopy/http": "2.0.0 <= v < 3.0.0"
     },
     "test-dependencies": {
         "canopy/test": "1.0.0 <= v < 3.0.0"

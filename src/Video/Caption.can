@@ -10,6 +10,9 @@ Renders an absolutely-positioned overlay filling the video area above
 the control bar. Each active VTT cue is positioned individually using
 the cue's `CueSettings` (line, position, size, align, vertical direction).
 
+Cue text is parsed for VTT inline markup (`<b>`, `<i>`, `<u>`, `<v>`,
+`<c>` tags) and rendered as real HTML elements rather than plain text.
+
 Cue text is taken from `Media.Track.Cue` records obtained via
 `Media.Track.getActiveCues`.
 
@@ -25,6 +28,7 @@ Cue text is taken from `Media.Track.Cue` records obtained via
 import Css
 import Css.Value
 import Html
+import Html.Attributes as Attr
 import Media.Track
 
 
@@ -148,8 +152,8 @@ cueView cue =
              , Css.top (Css.Value.pct clampedTop)
              , Css.transform [ Css.Value.translate (Css.Value.pct -50) Css.Value.zero ]
              , Css.width (Css.Value.pct widthPct)
-             , Css.backgroundColor (Css.Value.rgba 0 0 0 0.8)
-             , Css.color (Css.Value.hex "#ffffff")
+             , Css.property "background-color" "var(--video-cue-bg, rgba(0,0,0,0.8))"
+             , Css.property "color" "var(--video-cue-fg, #ffffff)"
              , Css.fontSize (Css.Value.rem 1)
              , Css.lineHeight (Css.Value.num 1.4)
              , Css.padding2 (Css.Value.px 4) (Css.Value.px 8)
@@ -159,4 +163,81 @@ cueView cue =
              ] ++ writingModeStyles
             )
         ]
-        [ Html.text cue.text ]
+        [ Html.div [] (parseVttText cue.text) ]
+
+
+{-| Parse VTT inline markup tags into Html nodes.
+
+Handles `<b>`, `<i>`, `<u>`, `<v name>` (voice), and `<c.class>`
+(cue class) tags. Closing tags contribute only their trailing text.
+Unknown tags render as plain text. Plain text segments become
+`Html.text` nodes.
+
+-}
+parseVttText : String -> List (Html.Html msg)
+parseVttText text =
+    let
+        segments =
+            String.split "<" text
+
+        parseFirst first =
+            if String.isEmpty first then
+                []
+            else
+                [ Html.text first ]
+
+        parseTaggedSegment seg =
+            case String.split ">" seg of
+                [] ->
+                    []
+
+                [ noClose ] ->
+                    [ Html.text ("<" ++ noClose) ]
+
+                tagPart :: rest ->
+                    let
+                        textContent =
+                            String.join ">" rest
+                    in
+                    [ vttTagToNode tagPart textContent ]
+    in
+    case segments of
+        [] ->
+            []
+
+        first :: rest ->
+            parseFirst first ++ List.concatMap parseTaggedSegment rest
+
+
+vttTagToNode : String -> String -> Html.Html msg
+vttTagToNode tag content =
+    let
+        trimmed =
+            String.trim tag
+    in
+    if String.startsWith "/" trimmed then
+        -- Closing tag — render the trailing text content only
+        Html.text content
+
+    else if trimmed == "b" then
+        Html.node "b" [] [ Html.text content ]
+
+    else if trimmed == "i" then
+        Html.node "i" [] [ Html.text content ]
+
+    else if trimmed == "u" then
+        Html.node "u" [] [ Html.text content ]
+
+    else if String.startsWith "v " trimmed then
+        Html.span
+            [ Attr.attribute "data-voice" (String.dropLeft 2 trimmed) ]
+            [ Html.text content ]
+
+    else if String.startsWith "c." trimmed then
+        Html.span
+            [ Attr.attribute "data-cue-class" (String.dropLeft 2 trimmed) ]
+            [ Html.text content ]
+
+    else
+        -- Unknown or timestamp tag — render content as plain text
+        Html.text content

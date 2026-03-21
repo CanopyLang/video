@@ -48,6 +48,10 @@ import Video.Source exposing (Source)
   - `aspectRatio` — maintain a fixed aspect ratio container.
   - `showControls` — whether to show the built-in control bar.
   - `keyboardShortcuts` — enable Space/arrows/etc. keyboard shortcuts.
+  - `thumbnailVttUrl` — optional URL of a WebVTT sprite sheet for seek
+    thumbnails. When Nothing, live frame capture via
+    `Media.Capture.captureFrameAt` is used instead.
+  - `enableTouchGestures` — enable tap/swipe touch gestures (default True).
 
 Player events (ready, error, ended) are communicated to the parent
 application via `Video.OutMsg` returned from `Video.update`.
@@ -65,6 +69,8 @@ type alias Config =
     , aspectRatio : AspectRatio
     , showControls : Bool
     , keyboardShortcuts : Bool
+    , thumbnailVttUrl : Maybe String
+    , enableTouchGestures : Bool
     }
 
 
@@ -85,11 +91,21 @@ type Theme
 
 All values are CSS colour strings (hex, rgb, rgba, named colours, etc.).
 
-  - `controlsBg` — gradient background behind the controls bar.
+  - `controlsBg` — background colour of individual control elements.
   - `controlsFg` — icon and text colour within the controls bar.
   - `progressFill` — playback-progress fill colour on the seek bar.
   - `progressThumb` — seek bar scrubber thumb colour.
   - `loadedFill` — buffered-range fill colour on the seek bar.
+  - `controlsBgGradient` — dark gradient stop behind the controls bar
+    (the gradient goes from this colour at the bottom to transparent).
+  - `errorBg` — background colour of the error overlay.
+  - `errorFg` — text colour of the error overlay.
+  - `spinnerColor` — buffering spinner stroke colour.
+  - `liveBg` — background colour of the LIVE badge.
+  - `liveFg` — text colour of the LIVE badge.
+  - `cueBg` — background colour behind caption cue boxes.
+  - `cueFg` — text colour of caption cue boxes.
+  - `thumbBg` — background colour of the seek thumbnail container.
 
 -}
 type alias ThemeVars =
@@ -98,6 +114,15 @@ type alias ThemeVars =
     , progressFill : String
     , progressThumb : String
     , loadedFill : String
+    , controlsBgGradient : String
+    , errorBg : String
+    , errorFg : String
+    , spinnerColor : String
+    , liveBg : String
+    , liveFg : String
+    , cueBg : String
+    , cueFg : String
+    , thumbBg : String
     }
 
 
@@ -142,4 +167,6 @@ defaultConfig mediaId source =
     , aspectRatio = Ratio16x9
     , showControls = True
     , keyboardShortcuts = True
+    , thumbnailVttUrl = Nothing
+    , enableTouchGestures = True
     }
