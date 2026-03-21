@@ -42,6 +42,10 @@ suite =
         , thumbnailInternalMsgTests
         , subscriptionsTests
         , updateTests
+        , hlsHandlerTests
+        , dashHandlerTests
+        , playbackHandlerTests
+        , uiHandlerTests
         ]
 
 
@@ -1342,4 +1346,405 @@ updateTests =
                     ( _, _, outMsg ) = run (Video.GotRemoteAvailability True)
                 in
                 Expect.equal Nothing outMsg
+        ]
+
+
+
+-- HLS HANDLER TESTS
+
+
+hlsHandlerTests : Test
+hlsHandlerTests =
+    let
+        cfg =
+            Video.Config.defaultConfig
+                (Media.id "hls-handler")
+                (Video.Source.hls "https://example.com/stream.m3u8")
+
+        initState =
+            Tuple.first (Video.init cfg)
+
+        run msg =
+            Video.update cfg msg initState
+    in
+    describe "HLS handler (updateHls)"
+        [ test "HlsManifestParsed with levels emits QualityLevelsLoaded OutMsg" <|
+            \_ ->
+                let
+                    levels =
+                        [ { index = 0, name = "360p", bitrate = 500000, width = 640, height = 360 }
+                        , { index = 1, name = "720p", bitrate = 2000000, width = 1280, height = 720 }
+                        ]
+
+                    ( _, _, outMsg ) =
+                        run (Video.HlsMsg (Video.HlsManifestParsed levels))
+                in
+                case outMsg of
+                    Just (Video.QualityLevelsLoaded qs) ->
+                        Expect.equal 2 (List.length qs)
+
+                    _ ->
+                        Expect.fail "Expected QualityLevelsLoaded"
+
+        , test "HlsManifestParsed with empty levels emits no OutMsg" <|
+            \_ ->
+                let
+                    ( _, _, outMsg ) =
+                        run (Video.HlsMsg (Video.HlsManifestParsed []))
+                in
+                Expect.equal Nothing outMsg
+
+        , test "HlsManifestParsed stores quality levels in state" <|
+            \_ ->
+                let
+                    levels =
+                        [ { index = 0, name = "360p", bitrate = 500000, width = 640, height = 360 } ]
+
+                    ( state, _, _ ) =
+                        run (Video.HlsMsg (Video.HlsManifestParsed levels))
+                in
+                Expect.equal 1 (List.length (Video.availableQualities state))
+
+        , test "HlsLevelSwitched emits QualityChanged OutMsg for known level" <|
+            \_ ->
+                let
+                    levels =
+                        [ { index = 0, name = "360p", bitrate = 500000, width = 640, height = 360 }
+                        , { index = 1, name = "720p", bitrate = 2000000, width = 1280, height = 720 }
+                        ]
+
+                    ( stateWithLevels, _, _ ) =
+                        run (Video.HlsMsg (Video.HlsManifestParsed levels))
+
+                    ( _, _, outMsg ) =
+                        Video.update cfg
+                            (Video.HlsMsg (Video.HlsLevelSwitched { index = 1, name = "720p", bitrate = 2000000, width = 1280, height = 720 }))
+                            stateWithLevels
+                in
+                case outMsg of
+                    Just (Video.QualityChanged q) ->
+                        Expect.equal 1 q.index
+
+                    _ ->
+                        Expect.fail "Expected QualityChanged"
+
+        , test "HlsError with isFatal True emits PlaybackError OutMsg" <|
+            \_ ->
+                let
+                    ( _, _, outMsg ) =
+                        run (Video.HlsMsg (Video.HlsError "network error" True))
+                in
+                case outMsg of
+                    Just (Video.PlaybackError _) ->
+                        Expect.pass
+
+                    _ ->
+                        Expect.fail "Expected PlaybackError"
+
+        , test "HlsError with isFatal False emits no OutMsg" <|
+            \_ ->
+                let
+                    ( _, _, outMsg ) =
+                        run (Video.HlsMsg (Video.HlsError "buffer stall" False))
+                in
+                Expect.equal Nothing outMsg
+
+        , test "HlsFragLoaded emits no OutMsg" <|
+            \_ ->
+                let
+                    ( _, _, outMsg ) = run (Video.HlsMsg Video.HlsFragLoaded)
+                in
+                Expect.equal Nothing outMsg
+        ]
+
+
+
+-- DASH HANDLER TESTS
+
+
+dashHandlerTests : Test
+dashHandlerTests =
+    let
+        cfg =
+            Video.Config.defaultConfig
+                (Media.id "dash-handler")
+                (Video.Source.dash "https://example.com/manifest.mpd")
+
+        initState =
+            Tuple.first (Video.init cfg)
+
+        run msg =
+            Video.update cfg msg initState
+    in
+    describe "Dash handler (updateDash)"
+        [ test "DashQualitiesLoaded stores qualities in state" <|
+            \_ ->
+                let
+                    qualities =
+                        [ { index = 0, label = "720p", bitrate = 2000000, width = 1280, height = 720 }
+                        , { index = 1, label = "1080p", bitrate = 5000000, width = 1920, height = 1080 }
+                        ]
+
+                    ( state, _, _ ) =
+                        run (Video.DashMsg (Video.DashQualitiesLoaded qualities))
+                in
+                Expect.equal 2 (List.length (Video.availableQualities state))
+
+        , test "DashQualitiesLoaded with levels emits QualityLevelsLoaded OutMsg" <|
+            \_ ->
+                let
+                    qualities =
+                        [ { index = 0, label = "720p", bitrate = 2000000, width = 1280, height = 720 } ]
+
+                    ( _, _, outMsg ) =
+                        run (Video.DashMsg (Video.DashQualitiesLoaded qualities))
+                in
+                case outMsg of
+                    Just (Video.QualityLevelsLoaded qs) ->
+                        Expect.equal 1 (List.length qs)
+
+                    _ ->
+                        Expect.fail "Expected QualityLevelsLoaded"
+
+        , test "DashQualitiesLoaded empty list emits no OutMsg" <|
+            \_ ->
+                let
+                    ( _, _, outMsg ) =
+                        run (Video.DashMsg (Video.DashQualitiesLoaded []))
+                in
+                Expect.equal Nothing outMsg
+
+        , test "DashStreamInitialized emits Ready OutMsg" <|
+            \_ ->
+                let
+                    ( _, _, outMsg ) =
+                        run (Video.DashMsg Video.DashStreamInitialized)
+                in
+                Expect.equal (Just Video.Ready) outMsg
+
+        , test "DashError sets hasError to True" <|
+            \_ ->
+                let
+                    ( state, _, _ ) =
+                        run (Video.DashMsg (Video.DashError "manifest parse failed"))
+                in
+                Expect.equal True (Video.hasError state)
+
+        , test "DashError emits PlaybackError OutMsg" <|
+            \_ ->
+                let
+                    ( _, _, outMsg ) =
+                        run (Video.DashMsg (Video.DashError "manifest parse failed"))
+                in
+                case outMsg of
+                    Just (Video.PlaybackError _) ->
+                        Expect.pass
+
+                    _ ->
+                        Expect.fail "Expected PlaybackError"
+        ]
+
+
+
+-- PLAYBACK HANDLER TESTS
+
+
+playbackHandlerTests : Test
+playbackHandlerTests =
+    let
+        cfg =
+            Video.Config.defaultConfig
+                (Media.id "playback-handler")
+                (Video.Source.plain "https://example.com/v.mp4")
+
+        initState =
+            Tuple.first (Video.init cfg)
+
+        run msg =
+            Video.update cfg msg initState
+    in
+    describe "Playback handler"
+        [ test "Retry clears hasError flag" <|
+            \_ ->
+                let
+                    ( state, _, _ ) = run Video.Retry
+                in
+                Expect.equal False (Video.hasError state)
+
+        , test "Retry clears lastError" <|
+            \_ ->
+                let
+                    ( state, _, _ ) = run Video.Retry
+                in
+                Expect.equal Nothing (Video.lastError state)
+
+        , test "PlayPause issues a Cmd (not a no-op)" <|
+            \_ ->
+                let
+                    ( _, cmd, _ ) = run Video.PlayPause
+                in
+                Expect.notEqual Cmd.none cmd
+
+        , test "SeekTo issues a Cmd" <|
+            \_ ->
+                let
+                    ( _, cmd, _ ) = run (Video.SeekTo 30.0)
+                in
+                Expect.notEqual Cmd.none cmd
+
+        , test "SetVolume issues a Cmd" <|
+            \_ ->
+                let
+                    ( _, cmd, _ ) = run (Video.SetVolume 0.5)
+                in
+                Expect.notEqual Cmd.none cmd
+
+        , test "ToggleMute issues a Cmd" <|
+            \_ ->
+                let
+                    ( _, cmd, _ ) = run Video.ToggleMute
+                in
+                Expect.notEqual Cmd.none cmd
+
+        , test "SetPlaybackRate 2.0 closes active menu and issues Cmd" <|
+            \_ ->
+                let
+                    ( opened, _, _ ) = run (Video.OpenMenu "speed")
+                    ( state, cmd, _ ) =
+                        Video.update cfg (Video.SetPlaybackRate 2.0) opened
+                in
+                Expect.all
+                    [ \_ -> Expect.equal Nothing (Video.activeMenu state)
+                    , \_ -> Expect.notEqual Cmd.none cmd
+                    ]
+                    ()
+
+        , test "GotThumbnailFrame Ok sets thumbnailDataUrl and clears capturing flag" <|
+            \_ ->
+                let
+                    url = "data:image/png;base64,abc"
+                    ( state, _, _ ) =
+                        run (Video.GotThumbnailFrame (Ok url))
+                in
+                Expect.all
+                    [ \_ -> Expect.equal (Just url) (Video.thumbnailDataUrl state)
+                    , \_ -> Expect.equal False (Video.thumbnailCapturing state)
+                    ]
+                    ()
+
+        , test "GotThumbnailFrame Err clears thumbnailDataUrl and capturing flag" <|
+            \_ ->
+                let
+                    ( state, _, _ ) =
+                        run (Video.GotThumbnailFrame (Err Media.NetworkError))
+                in
+                Expect.all
+                    [ \_ -> Expect.equal Nothing (Video.thumbnailDataUrl state)
+                    , \_ -> Expect.equal False (Video.thumbnailCapturing state)
+                    ]
+                    ()
+        ]
+
+
+
+-- UI HANDLER TESTS
+
+
+uiHandlerTests : Test
+uiHandlerTests =
+    let
+        cfg =
+            Video.Config.defaultConfig
+                (Media.id "ui-handler")
+                (Video.Source.plain "https://example.com/v.mp4")
+
+        initState =
+            Tuple.first (Video.init cfg)
+
+        run msg =
+            Video.update cfg msg initState
+    in
+    describe "UI handler"
+        [ test "ShowControls after HideControls restores controlsVisible" <|
+            \_ ->
+                let
+                    ( hidden, _, _ ) = run Video.HideControls
+                    ( state, _, _ ) =
+                        Video.update cfg Video.ShowControls hidden
+                in
+                Expect.equal True (Video.controlsVisible state)
+
+        , test "HideControls sets controlsVisible to False" <|
+            \_ ->
+                let
+                    ( state, _, _ ) = run Video.HideControls
+                in
+                Expect.equal False (Video.controlsVisible state)
+
+        , test "ControlsActivity sets controlsVisible to True" <|
+            \_ ->
+                let
+                    ( hidden, _, _ ) = run Video.HideControls
+                    ( state, _, _ ) =
+                        Video.update cfg Video.ControlsActivity hidden
+                in
+                Expect.equal True (Video.controlsVisible state)
+
+        , test "OpenMenu sets activeMenu" <|
+            \_ ->
+                let
+                    ( state, _, _ ) = run (Video.OpenMenu "captions")
+                in
+                Expect.equal (Just "captions") (Video.activeMenu state)
+
+        , test "CloseMenu clears activeMenu" <|
+            \_ ->
+                let
+                    ( opened, _, _ ) = run (Video.OpenMenu "captions")
+                    ( state, _, _ ) =
+                        Video.update cfg Video.CloseMenu opened
+                in
+                Expect.equal Nothing (Video.activeMenu state)
+
+        , test "GotPlayerWidth below 480 sets isCompact True" <|
+            \_ ->
+                let
+                    ( state, _, _ ) = run (Video.GotPlayerWidth 320)
+                in
+                Expect.equal True (Video.isCompact state)
+
+        , test "GotPlayerWidth at 480 is not compact (boundary: strictly < 480)" <|
+            \_ ->
+                let
+                    ( state, _, _ ) = run (Video.GotPlayerWidth 480)
+                in
+                Expect.equal False (Video.isCompact state)
+
+        , test "GotFullscreenChange True sets isFullscreen" <|
+            \_ ->
+                let
+                    ( state, _, _ ) = run (Video.GotFullscreenChange True)
+                in
+                Expect.equal True (Video.isFullscreen state)
+
+        , test "GotPipChange True sets isPip" <|
+            \_ ->
+                let
+                    ( state, _, _ ) = run (Video.GotPipChange True)
+                in
+                Expect.equal True (Video.isPip state)
+
+        , test "GotRemoteAvailability False clears remoteAvailable" <|
+            \_ ->
+                let
+                    ( state, _, _ ) = run (Video.GotRemoteAvailability False)
+                in
+                Expect.equal False (Video.remoteAvailable state)
+
+        , test "ToggleRemotePlayback emits RemotePlaybackRequested" <|
+            \_ ->
+                let
+                    ( _, _, outMsg ) = run Video.ToggleRemotePlayback
+                in
+                Expect.equal (Just Video.RemotePlaybackRequested) outMsg
         ]
