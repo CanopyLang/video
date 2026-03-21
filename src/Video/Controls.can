@@ -332,7 +332,7 @@ seekBar cfg =
         [ -- All buffered ranges
           Html.div [] (List.map (bufferedRangeDiv cfg.duration) cfg.buffered)
         , -- Chapter markers
-          Html.div [] (List.map (chapterMarkerDiv cfg.duration) cfg.chapters)
+          Html.div [] (List.map (chapterMarkerDiv cfg.duration cfg.onSeek) cfg.chapters)
         , -- Playback progress
           Html.div
             [ Css.inlineStyle
@@ -525,38 +525,60 @@ qualityMenu cfg =
                         "Auto"
 
         renderOption lvl =
+            let
+                isActive =
+                    lvl.index == cfg.currentLevel
+
+                displayLabel =
+                    levelLabel lvl
+
+                bitrateText =
+                    if lvl.bitrate > 0 then
+                        " (" ++ String.fromInt (lvl.bitrate // 1000) ++ " kbps)"
+                    else
+                        ""
+            in
             Html.li
                 [ Css.inlineStyle
                     [ Css.padding2 (Css.Value.px 6) (Css.Value.px 12)
                     , Css.cursor Css.Value.pointer
                     , Css.property "list-style" "none"
                     , Css.backgroundColor
-                        (if lvl.index == cfg.currentLevel then
+                        (if isActive then
                             Css.Value.rgba 255 255 255 0.15
                          else
                             Css.Value.transparent
                         )
                     ]
                 , Events.onClick (cfg.onSelect lvl.index)
-                , Attr.attribute "role" "menuitem"
+                , Attr.attribute "role" "menuitemradio"
+                , Attr.attribute "aria-checked" (if isActive then "true" else "false")
+                , Attr.attribute "aria-current" (if isActive then "true" else "false")
+                , Attr.attribute "aria-label" (displayLabel ++ bitrateText)
                 ]
-                [ Html.text (levelLabel lvl) ]
+                [ Html.text displayLabel ]
 
         autoOption =
+            let
+                isActive =
+                    cfg.currentLevel == -1
+            in
             Html.li
                 [ Css.inlineStyle
                     [ Css.padding2 (Css.Value.px 6) (Css.Value.px 12)
                     , Css.cursor Css.Value.pointer
                     , Css.property "list-style" "none"
                     , Css.backgroundColor
-                        (if cfg.currentLevel == -1 then
+                        (if isActive then
                             Css.Value.rgba 255 255 255 0.15
                          else
                             Css.Value.transparent
                         )
                     ]
                 , Events.onClick (cfg.onSelect -1)
-                , Attr.attribute "role" "menuitem"
+                , Attr.attribute "role" "menuitemradio"
+                , Attr.attribute "aria-checked" (if isActive then "true" else "false")
+                , Attr.attribute "aria-current" (if isActive then "true" else "false")
                 ]
                 [ Html.text "Auto" ]
     in
@@ -630,40 +652,55 @@ captionsMenu cfg =
     else
         let
             offOption =
+                let
+                    isActive =
+                        cfg.activeTrack == Nothing
+                in
                 Html.li
                     [ Css.inlineStyle
                         [ Css.padding2 (Css.Value.px 6) (Css.Value.px 12)
                         , Css.cursor Css.Value.pointer
                         , Css.property "list-style" "none"
                         , Css.backgroundColor
-                            (if cfg.activeTrack == Nothing then
+                            (if isActive then
                                 Css.Value.rgba 255 255 255 0.15
                              else
                                 Css.Value.transparent
                             )
                         ]
                     , Events.onClick (cfg.onSelect Nothing)
-                    , Attr.attribute "role" "menuitem"
+                    , Attr.attribute "role" "menuitemradio"
+                    , Attr.attribute "aria-checked" (if isActive then "true" else "false")
+                    , Attr.attribute "aria-current" (if isActive then "true" else "false")
                     ]
                     [ Html.text "Off" ]
 
             renderTrack track =
+                let
+                    isActive =
+                        cfg.activeTrack == Just track.index
+
+                    trackLabel =
+                        if track.label /= "" then track.label else track.language
+                in
                 Html.li
                     [ Css.inlineStyle
                         [ Css.padding2 (Css.Value.px 6) (Css.Value.px 12)
                         , Css.cursor Css.Value.pointer
                         , Css.property "list-style" "none"
                         , Css.backgroundColor
-                            (if cfg.activeTrack == Just track.index then
+                            (if isActive then
                                 Css.Value.rgba 255 255 255 0.15
                              else
                                 Css.Value.transparent
                             )
                         ]
                     , Events.onClick (cfg.onSelect (Just track.index))
-                    , Attr.attribute "role" "menuitem"
+                    , Attr.attribute "role" "menuitemradio"
+                    , Attr.attribute "aria-checked" (if isActive then "true" else "false")
+                    , Attr.attribute "aria-current" (if isActive then "true" else "false")
                     ]
-                    [ Html.text (if track.label /= "" then track.label else track.language) ]
+                    [ Html.text trackLabel ]
         in
         Html.div
             [ Css.inlineStyle
@@ -838,14 +875,17 @@ bufferedRangeDiv totalDuration range =
         []
 
 
-chapterMarkerDiv : Float -> { startTime : Float, endTime : Float, title : String } -> Html.Html msg
-chapterMarkerDiv duration cue =
+chapterMarkerDiv : Float -> (Float -> msg) -> { startTime : Float, endTime : Float, title : String } -> Html.Html msg
+chapterMarkerDiv duration onSeek cue =
     let
         pct =
             if duration > 0 then
                 cue.startTime / duration * 100
             else
                 0
+
+        ariaLabel_ =
+            "Chapter: " ++ cue.title ++ " at " ++ formatTime cue.startTime
     in
     Html.div
         [ Css.inlineStyle
@@ -857,9 +897,13 @@ chapterMarkerDiv duration cue =
             , Css.property "background-color" "var(--video-chapter-marker, rgba(255,255,255,0.6))"
             , Css.borderRadius (Css.Value.px 1)
             , Css.zIndex (Css.Value.int_ 2)
+            , Css.cursor Css.Value.pointer
             ]
         , Attr.attribute "title" cue.title
-        , Attr.attribute "aria-hidden" "true"
+        , Attr.attribute "role" "button"
+        , Attr.attribute "aria-label" ariaLabel_
+        , Attr.attribute "tabindex" "0"
+        , Events.onClick (onSeek cue.startTime)
         ]
         []
 

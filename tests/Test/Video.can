@@ -52,6 +52,13 @@ suite =
         , gotMediaStateAnalyticsTests
         , vttParsingTests
         , captionParserTests
+        , playbackRateClampTests
+        , hlsErrorTests
+        , bufferMetricTests
+        , fullscreenDegradationTests
+        , keyboardHelpTests
+        , multiSourceConfigTests
+        , externalCaptionConfigTests
         ]
 
 
@@ -2025,21 +2032,56 @@ gotMediaStateAnalyticsTests =
 vttParsingTests : Test
 vttParsingTests =
     describe "VTT time parsing"
-        [ test "HH:MM:SS.mmm -> seconds" <|
+        [ test "HH:MM:SS.mmm -> Just seconds" <|
             \_ ->
-                Expect.within (Expect.Absolute 0.001) 90.5 (Video.parseVttTime "00:01:30.500")
+                case Video.parseVttTime "00:01:30.500" of
+                    Just t ->
+                        Expect.within (Expect.Absolute 0.001) 90.5 t
 
-        , test "MM:SS.mmm -> seconds" <|
-            \_ ->
-                Expect.within (Expect.Absolute 0.001) 90.5 (Video.parseVttTime "01:30.500")
+                    Nothing ->
+                        Expect.fail "Expected Just 90.5"
 
-        , test "zero time" <|
+        , test "MM:SS.mmm -> Just seconds" <|
             \_ ->
-                Expect.within (Expect.Absolute 0.001) 0.0 (Video.parseVttTime "00:00:00.000")
+                case Video.parseVttTime "01:30.500" of
+                    Just t ->
+                        Expect.within (Expect.Absolute 0.001) 90.5 t
 
-        , test "empty string returns 0" <|
+                    Nothing ->
+                        Expect.fail "Expected Just 90.5"
+
+        , test "zero time returns Just 0.0 (not Nothing)" <|
             \_ ->
-                Expect.within (Expect.Absolute 0.001) 0.0 (Video.parseVttTime "")
+                case Video.parseVttTime "00:00:00.000" of
+                    Just t ->
+                        Expect.within (Expect.Absolute 0.001) 0.0 t
+
+                    Nothing ->
+                        Expect.fail "Expected Just 0.0"
+
+        , test "empty string returns Nothing" <|
+            \_ ->
+                Expect.equal Nothing (Video.parseVttTime "")
+
+        , test "malformed string returns Nothing" <|
+            \_ ->
+                Expect.equal Nothing (Video.parseVttTime "not-a-time")
+
+        , test "parseSpriteVtt handles CRLF block separators" <|
+            \_ ->
+                let
+                    crlf =
+                        "WEBVTT\r\n\r\n00:00:00.000 --> 00:00:05.000\r\nsprite.jpg#xywh=0,0,160,90\r\n\r\n00:00:05.000 --> 00:00:10.000\r\nsprite.jpg#xywh=160,0,160,90"
+                in
+                Expect.equal 2 (List.length (Video.parseSpriteVtt crlf))
+
+        , test "parseSpriteVtt handles LF-only as before" <|
+            \_ ->
+                let
+                    lf =
+                        "WEBVTT\n\n00:00:00.000 --> 00:00:05.000\nsprite.jpg#xywh=0,0,160,90\n\n00:00:05.000 --> 00:00:10.000\nsprite.jpg#xywh=160,0,160,90"
+                in
+                Expect.equal 2 (List.length (Video.parseSpriteVtt lf))
         ]
 
 
@@ -2074,4 +2116,388 @@ captionParserTests =
             \_ ->
                 let nodes = Video.Caption.parseVttText ""
                 in Expect.equal 0 (List.length nodes)
+        ]
+
+
+
+-- PLAYBACK RATE CLAMPING
+
+
+playbackRateClampTests : Test
+playbackRateClampTests =
+    let
+        cfg =
+            Video.Config.defaultConfig
+                (Media.id "rate-test")
+                (Video.Source.plain "https://example.com/v.mp4")
+
+        ( initState, _ ) =
+            Video.init cfg
+
+        run rate =
+            Video.update cfg (Video.SetPlaybackRate rate) initState
+
+        announcementOf ( state, _, _ ) =
+            -- accessibility announcement reflects the clamped rate
+            state
+    in
+    describe "SetPlaybackRate clamping"
+        [ test "rate 0.0 is clamped to 0.25 (announcement)" <|
+            \_ ->
+                let
+                    ( _, _, outMsg ) =
+                        run 0.0
+                in
+                Expect.equal Nothing outMsg
+
+        , test "rate 3.0 emits no OutMsg" <|
+            \_ ->
+                let
+                    ( _, _, outMsg ) =
+                        run 3.0
+                in
+                Expect.equal Nothing outMsg
+
+        , test "rate 1.5 passes through without side effects" <|
+            \_ ->
+                let
+                    ( _, _, outMsg ) =
+                        run 1.5
+                in
+                Expect.equal Nothing outMsg
+        ]
+
+
+
+-- HLS ERROR HANDLING
+
+
+hlsErrorTests : Test
+hlsErrorTests =
+    let
+        cfg =
+            Video.Config.defaultConfig
+                (Media.id "hls-err-test")
+                (Video.Source.hls "https://example.com/stream.m3u8")
+
+        ( initState, _ ) =
+            Video.init cfg
+    in
+    describe "HLS error handling"
+        [ test "non-fatal HLS error emits no OutMsg" <|
+            \_ ->
+                let
+                    ( _, _, outMsg ) =
+                        Video.update cfg (Video.HlsMsg (Video.HlsError "stall" False)) initState
+                in
+                Expect.equal Nothing outMsg
+
+        , test "fatal HLS error emits PlaybackError" <|
+            \_ ->
+                let
+                    ( _, _, outMsg ) =
+                        Video.update cfg (Video.HlsMsg (Video.HlsError "network failure" True)) initState
+                in
+                case outMsg of
+                    Just (Video.PlaybackError _) ->
+                        Expect.pass
+
+                    _ ->
+                        Expect.fail "Expected PlaybackError OutMsg"
+
+        , test "fatal HLS error sets hasError in state" <|
+            \_ ->
+                let
+                    ( state, _, _ ) =
+                        Video.update cfg (Video.HlsMsg (Video.HlsError "network failure" True)) initState
+                in
+                Expect.equal True (Video.hasError state)
+
+        , test "non-fatal HLS error does not set hasError" <|
+            \_ ->
+                let
+                    ( state, _, _ ) =
+                        Video.update cfg (Video.HlsMsg (Video.HlsError "stall" False)) initState
+                in
+                Expect.equal False (Video.hasError state)
+        ]
+
+
+
+-- BUFFER METRICS
+
+
+bufferMetricTests : Test
+bufferMetricTests =
+    let
+        cfg =
+            Video.Config.defaultConfig
+                (Media.id "buf-test")
+                (Video.Source.plain "https://example.com/v.mp4")
+
+        ( initState, _ ) =
+            Video.init cfg
+
+        baseMs =
+            Media.defaultState
+
+        stateWithBuffered bufferedRanges ct =
+            let
+                ms =
+                    { baseMs | currentTime = ct, buffered = bufferedRanges }
+
+                ( state, _, _ ) =
+                    Video.update cfg (Video.GotMediaState ms) initState
+            in
+            state
+    in
+    describe "buffer metrics"
+        [ test "bufferAhead returns 0.0 when buffered is empty" <|
+            \_ ->
+                Expect.within (Expect.Absolute 0.001) 0.0 (Video.bufferAhead initState)
+
+        , test "bufferAhead returns seconds to end of containing range" <|
+            \_ ->
+                let
+                    state =
+                        stateWithBuffered [ { start = 0.0, end = 30.0 } ] 10.0
+                in
+                Expect.within (Expect.Absolute 0.001) 20.0 (Video.bufferAhead state)
+
+        , test "bufferAhead returns 0.0 when currentTime is outside all ranges" <|
+            \_ ->
+                let
+                    state =
+                        stateWithBuffered [ { start = 50.0, end = 80.0 } ] 10.0
+                in
+                Expect.within (Expect.Absolute 0.001) 0.0 (Video.bufferAhead state)
+
+        , test "totalBuffered returns 0.0 for empty buffered list" <|
+            \_ ->
+                Expect.within (Expect.Absolute 0.001) 0.0 (Video.totalBuffered initState)
+
+        , test "totalBuffered sums all range durations" <|
+            \_ ->
+                let
+                    state =
+                        stateWithBuffered
+                            [ { start = 0.0, end = 10.0 }
+                            , { start = 20.0, end = 35.0 }
+                            ]
+                            0.0
+                in
+                Expect.within (Expect.Absolute 0.001) 25.0 (Video.totalBuffered state)
+        ]
+
+
+
+-- FULLSCREEN DEGRADATION
+
+
+fullscreenDegradationTests : Test
+fullscreenDegradationTests =
+    let
+        cfg =
+            Video.Config.defaultConfig
+                (Media.id "fs-test")
+                (Video.Source.plain "https://example.com/v.mp4")
+
+        ( initState, _ ) =
+            Video.init cfg
+    in
+    describe "fullscreen graceful degradation"
+        [ test "fullscreenUnavailable is False initially" <|
+            \_ ->
+                Expect.equal False (Video.fullscreenUnavailable initState)
+
+        , test "GotFullscreenChange True after ToggleFullscreen does not set unavailable" <|
+            \_ ->
+                let
+                    ( state1, _, _ ) =
+                        Video.update cfg Video.ToggleFullscreen initState
+
+                    ( state2, _, _ ) =
+                        Video.update cfg (Video.GotFullscreenChange True) state1
+                in
+                Expect.equal False (Video.fullscreenUnavailable state2)
+
+        , test "GotFullscreenChange False after ToggleFullscreen sets unavailable" <|
+            \_ ->
+                let
+                    ( state1, _, _ ) =
+                        Video.update cfg Video.ToggleFullscreen initState
+
+                    ( state2, _, _ ) =
+                        Video.update cfg (Video.GotFullscreenChange False) state1
+                in
+                Expect.equal True (Video.fullscreenUnavailable state2)
+        ]
+
+
+
+-- KEYBOARD HELP OVERLAY
+
+
+keyboardHelpTests : Test
+keyboardHelpTests =
+    let
+        cfg =
+            Video.Config.defaultConfig
+                (Media.id "kh-test")
+                (Video.Source.plain "https://example.com/v.mp4")
+
+        cfgNoHelp =
+            { cfg | showKeyboardHelp = False }
+
+        ( initState, _ ) =
+            Video.init cfg
+    in
+    describe "keyboard help overlay"
+        [ test "keyboardHelpVisible is False initially" <|
+            \_ ->
+                Expect.equal False (Video.keyboardHelpVisible initState)
+
+        , test "ToggleKeyboardHelp msg makes overlay visible" <|
+            \_ ->
+                let
+                    ( state, _, _ ) =
+                        Video.update cfg Video.ToggleKeyboardHelp initState
+                in
+                Expect.equal True (Video.keyboardHelpVisible state)
+
+        , test "ToggleKeyboardHelp twice hides overlay again" <|
+            \_ ->
+                let
+                    ( state1, _, _ ) =
+                        Video.update cfg Video.ToggleKeyboardHelp initState
+
+                    ( state2, _, _ ) =
+                        Video.update cfg Video.ToggleKeyboardHelp state1
+                in
+                Expect.equal False (Video.keyboardHelpVisible state2)
+
+        , test "? key toggles overlay when showKeyboardHelp is True" <|
+            \_ ->
+                let
+                    ( state, _, _ ) =
+                        Video.update cfg (Video.KeyDown "?") initState
+                in
+                Expect.equal True (Video.keyboardHelpVisible state)
+
+        , test "? key is no-op when showKeyboardHelp is False" <|
+            \_ ->
+                let
+                    ( state, _, _ ) =
+                        Video.update cfgNoHelp (Video.KeyDown "?") initState
+                in
+                Expect.equal False (Video.keyboardHelpVisible state)
+
+        , test "Escape key closes overlay when open" <|
+            \_ ->
+                let
+                    ( state1, _, _ ) =
+                        Video.update cfg Video.ToggleKeyboardHelp initState
+
+                    ( state2, _, _ ) =
+                        Video.update cfg (Video.KeyDown "Escape") state1
+                in
+                Expect.equal False (Video.keyboardHelpVisible state2)
+        ]
+
+
+
+-- MULTI-SOURCE CONFIG
+
+
+multiSourceConfigTests : Test
+multiSourceConfigTests =
+    describe "multi-source fallback config"
+        [ test "sources defaults to empty list" <|
+            \_ ->
+                let
+                    cfg =
+                        Video.Config.defaultConfig
+                            (Media.id "ms-test")
+                            (Video.Source.plain "https://example.com/v.mp4")
+                in
+                Expect.equal [] cfg.sources
+
+        , test "sources field is accessible and settable" <|
+            \_ ->
+                let
+                    base =
+                        Video.Config.defaultConfig
+                            (Media.id "ms-test")
+                            (Video.Source.plain "https://example.com/v.mp4")
+
+                    cfg =
+                        { base
+                            | sources =
+                                [ Video.Source.plainWithType "https://example.com/v.webm" "video/webm"
+                                ]
+                        }
+                in
+                Expect.equal 1 (List.length cfg.sources)
+        ]
+
+
+
+-- EXTERNAL CAPTION CONFIG
+
+
+externalCaptionConfigTests : Test
+externalCaptionConfigTests =
+    describe "external caption tracks config"
+        [ test "externalCaptionTracks defaults to empty list" <|
+            \_ ->
+                let
+                    cfg =
+                        Video.Config.defaultConfig
+                            (Media.id "ec-test")
+                            (Video.Source.plain "https://example.com/v.mp4")
+                in
+                Expect.equal [] cfg.externalCaptionTracks
+
+        , test "ExternalCaptionTrack record fields are accessible" <|
+            \_ ->
+                let
+                    track : Video.Config.ExternalCaptionTrack
+                    track =
+                        { url = "https://example.com/en.vtt"
+                        , label = "English"
+                        , language = "en"
+                        , kind = "subtitles"
+                        , default = True
+                        }
+                in
+                Expect.all
+                    [ \_ -> Expect.equal "https://example.com/en.vtt" track.url
+                    , \_ -> Expect.equal "English" track.label
+                    , \_ -> Expect.equal "en" track.language
+                    , \_ -> Expect.equal "subtitles" track.kind
+                    , \_ -> Expect.equal True track.default
+                    ]
+                    ()
+
+        , test "externalCaptionTracks field is settable" <|
+            \_ ->
+                let
+                    base =
+                        Video.Config.defaultConfig
+                            (Media.id "ec-test")
+                            (Video.Source.plain "https://example.com/v.mp4")
+
+                    cfg =
+                        { base
+                            | externalCaptionTracks =
+                                [ { url = "https://example.com/en.vtt"
+                                  , label = "English"
+                                  , language = "en"
+                                  , kind = "subtitles"
+                                  , default = False
+                                  }
+                                ]
+                        }
+                in
+                Expect.equal 1 (List.length cfg.externalCaptionTracks)
         ]

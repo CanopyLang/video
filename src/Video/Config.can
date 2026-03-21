@@ -5,6 +5,7 @@ module Video.Config exposing
     , AspectRatio(..)
     , CaptionFontSize(..)
     , CaptionStyle
+    , ExternalCaptionTrack
     , defaultConfig
     )
 
@@ -28,6 +29,9 @@ rebuilding the player.
 # Caption Style
 @docs CaptionFontSize, CaptionStyle
 
+# External Tracks
+@docs ExternalCaptionTrack
+
 -}
 
 
@@ -41,7 +45,11 @@ import Video.Source exposing (Source)
 
 {-| Complete player configuration.
 
-  - `source` — the video source (plain URL, HLS, or DASH).
+  - `source` — the primary video source (plain URL, HLS, or DASH).
+  - `sources` — additional `Plain` sources tried as codec fallbacks when
+    `source` is a `Plain` source and this list is non-empty. The browser
+    renders each entry as a `<source>` element and selects the first codec
+    it can decode. HLS and DASH sources in this list are ignored.
   - `mediaId` — the DOM element ID used to find the `<video>` element.
   - `autoplay` — start playing when the player is ready (requires muted
     or a prior user gesture; browsers block unmuted autoplay).
@@ -53,11 +61,16 @@ import Video.Source exposing (Source)
   - `aspectRatio` — maintain a fixed aspect ratio container.
   - `showControls` — whether to show the built-in control bar.
   - `keyboardShortcuts` — enable Space/arrows/etc. keyboard shortcuts.
+  - `showKeyboardHelp` — show a `?` button and help overlay listing all
+    keyboard shortcuts. Only meaningful when `keyboardShortcuts` is True.
   - `thumbnailVttUrl` — optional URL of a WebVTT sprite sheet for seek
     thumbnails. When Nothing, live frame capture via
     `Media.Capture.captureFrameAt` is used instead.
   - `enableTouchGestures` — enable tap/swipe touch gestures (default True).
   - `captionStyle` — font size and background opacity for caption cue boxes.
+  - `externalCaptionTracks` — subtitle and caption files to inject as
+    `<track>` elements. Tracks injected this way are automatically discovered
+    by the player after the media element loads.
 
 Player events (ready, error, ended) are communicated to the parent
 application via `Video.OutMsg` returned from `Video.update`.
@@ -65,6 +78,7 @@ application via `Video.OutMsg` returned from `Video.update`.
 -}
 type alias Config =
     { source : Source
+    , sources : List Source
     , mediaId : Media.MediaId
     , autoplay : Bool
     , muted : Bool
@@ -75,9 +89,11 @@ type alias Config =
     , aspectRatio : AspectRatio
     , showControls : Bool
     , keyboardShortcuts : Bool
+    , showKeyboardHelp : Bool
     , thumbnailVttUrl : Maybe String
     , enableTouchGestures : Bool
     , captionStyle : CaptionStyle
+    , externalCaptionTracks : List ExternalCaptionTrack
     }
 
 
@@ -170,6 +186,31 @@ type alias CaptionStyle =
     }
 
 
+{-| An externally-provided caption or subtitle track to inject into the
+video element as a `<track>` element.
+
+Tracks added this way are automatically discovered by the player after the
+media element loads, and will appear in the captions menu alongside any
+tracks embedded in the stream.
+
+  - `url` — URL of the WebVTT subtitle or caption file.
+  - `label` — human-readable label shown in the captions menu (e.g. "English").
+  - `language` — BCP 47 language tag (e.g. `"en"`, `"fr-CA"`).
+  - `kind` — track kind: `"subtitles"`, `"captions"`, `"descriptions"`,
+    `"chapters"`, or `"metadata"`.
+  - `default` — whether the browser should activate this track by default.
+    At most one track should have `default = True`.
+
+-}
+type alias ExternalCaptionTrack =
+    { url : String
+    , label : String
+    , language : String
+    , kind : String
+    , default : Bool
+    }
+
+
 
 -- DEFAULT CONFIG
 
@@ -183,6 +224,7 @@ autoplay. Requires a `MediaId` and a `Source`.
 defaultConfig : Media.MediaId -> Source -> Config
 defaultConfig mediaId source =
     { source = source
+    , sources = []
     , mediaId = mediaId
     , autoplay = False
     , muted = False
@@ -193,7 +235,9 @@ defaultConfig mediaId source =
     , aspectRatio = Ratio16x9
     , showControls = True
     , keyboardShortcuts = True
+    , showKeyboardHelp = True
     , thumbnailVttUrl = Nothing
     , enableTouchGestures = True
     , captionStyle = { fontSize = CaptionMedium, backgroundOpacity = 0.8 }
+    , externalCaptionTracks = []
     }

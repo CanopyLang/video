@@ -17,6 +17,8 @@ module Video exposing
     , duration
     , paused
     , buffered
+    , bufferAhead
+    , totalBuffered
     , currentQuality
     , availableQualities
     , captionTracks
@@ -28,6 +30,7 @@ module Video exposing
     , isFullscreen
     , isPip
     , isCompact
+    , fullscreenUnavailable
     , activeMenu
     , thumbnailDataUrl
     , thumbnailCapturing
@@ -37,7 +40,9 @@ module Video exposing
     , activeCaptionTrack
     , chapters
     , thumbnailSprites
+    , keyboardHelpVisible
     , parseVttTime
+    , parseSpriteVtt
     )
 
 
@@ -64,12 +69,13 @@ and `view` renders the HTML.
 @docs init, update, subscriptions, view
 
 # Accessors
-@docs currentTime, duration, paused, buffered, currentQuality, availableQualities, captionTracks
+@docs currentTime, duration, paused, buffered, bufferAhead, totalBuffered
+@docs currentQuality, availableQualities, captionTracks
 @docs controlsVisible, lastError, remoteAvailable, hasError
-@docs isLive, isFullscreen, isPip, isCompact, activeMenu
+@docs isLive, isFullscreen, isPip, isCompact, fullscreenUnavailable, activeMenu
 @docs thumbnailDataUrl, thumbnailCapturing
 @docs playbackRate, volume, muted, activeCaptionTrack, chapters, thumbnailSprites
-@docs parseVttTime
+@docs keyboardHelpVisible, parseVttTime, parseSpriteVtt
 
 -}
 
@@ -163,6 +169,9 @@ type alias StateRecord =
     , lastTapTime : Maybe Float
     , lastTapX : Maybe Float
     , playerWidth : Float
+    , keyboardHelpVisible : Bool
+    , pendingFullscreen : Bool
+    , fullscreenUnavailable : Bool
     }
 
 
@@ -288,6 +297,8 @@ type Msg
       -- Autoplay failure handling
     | AutoplayBlocked
     | DismissAutoplayNotice
+      -- Keyboard help overlay
+    | ToggleKeyboardHelp
 
 
 {-| Internal HLS messages. -}
@@ -423,6 +434,9 @@ init config =
                 , lastTapTime = Nothing
                 , lastTapX = Nothing
                 , playerWidth = 0.0
+                , keyboardHelpVisible = False
+                , pendingFullscreen = False
+                , fullscreenUnavailable = False
                 }
 
         streamingCmd =
@@ -655,8 +669,12 @@ update config msg (State s) =
             )
 
         SetPlaybackRate rate ->
-            ( State { s | activeMenu = Nothing, accessibilityAnnouncement = "Speed " ++ String.fromFloat rate ++ "x" }
-            , Media.setPlaybackRate config.mediaId rate
+            let
+                clamped =
+                    max 0.25 (min 2.0 rate)
+            in
+            ( State { s | activeMenu = Nothing, accessibilityAnnouncement = "Speed " ++ String.fromFloat clamped ++ "x" }
+            , Media.setPlaybackRate config.mediaId clamped
             , Nothing
             )
 
@@ -668,7 +686,7 @@ update config msg (State s) =
                     else
                         Media.Video.requestFullscreen config.mediaId
             in
-            ( State s, cmd, Nothing )
+            ( State { s | pendingFullscreen = not s.isFullscreen }, cmd, Nothing )
 
         TogglePip ->
             let
@@ -914,7 +932,26 @@ update config msg (State s) =
             )
 
         GotFullscreenChange isFs ->
-            ( State { s | isFullscreen = isFs }, Cmd.none, Nothing )
+            let
+                nowUnavailable =
+                    s.pendingFullscreen && not isFs && not s.isFullscreen
+            in
+            ( State
+                { s
+                    | isFullscreen = isFs
+                    , pendingFullscreen = False
+                    , fullscreenUnavailable =
+                        if nowUnavailable then True else s.fullscreenUnavailable
+                }
+            , Cmd.none
+            , Nothing
+            )
+
+        ToggleKeyboardHelp ->
+            ( State { s | keyboardHelpVisible = not s.keyboardHelpVisible }
+            , Cmd.none
+            , Nothing
+            )
 
         GotPipChange active ->
             ( State { s | isPip = active }, Cmd.none, Nothing )
@@ -1241,7 +1278,16 @@ handleKeyDown config key s =
             )
 
         "Escape" ->
-            ( State { s | activeMenu = Nothing }, Cmd.none, Nothing )
+            ( State { s | activeMenu = Nothing, keyboardHelpVisible = False }, Cmd.none, Nothing )
+
+        "?" ->
+            if config.showKeyboardHelp then
+                ( State { s | keyboardHelpVisible = not s.keyboardHelpVisible }
+                , Cmd.none
+                , Nothing
+                )
+            else
+                ( State s, Cmd.none, Nothing )
 
         "c" ->
             cycleCaptionTrack config s
@@ -1311,15 +1357,23 @@ handleTouchEnd config x y timestamp s =
             if abs dx < 10 && abs dy < 10 then
                 handleTap config x timestamp cleared s
             else if dx < -20 then
-                -- Swipe left: seek back 10s
+                -- Swipe left: seek back proportional to duration
+                let
+                    delta =
+                        proportionalSeekDelta s.playerWidth s.mediaState.duration (abs dx)
+                in
                 ( State cleared
-                , Media.seek config.mediaId (max 0 (s.mediaState.currentTime - 10))
+                , Media.seek config.mediaId (max 0 (s.mediaState.currentTime - delta))
                 , Nothing
                 )
             else if dx > 20 then
-                -- Swipe right: seek forward 10s
+                -- Swipe right: seek forward proportional to duration
+                let
+                    delta =
+                        proportionalSeekDelta s.playerWidth s.mediaState.duration dx
+                in
                 ( State cleared
-                , Media.seek config.mediaId (min s.mediaState.duration (s.mediaState.currentTime + 10))
+                , Media.seek config.mediaId (min s.mediaState.duration (s.mediaState.currentTime + delta))
                 , Nothing
                 )
             else if dy < -20 then
@@ -1378,11 +1432,14 @@ handleDoubleTap config tapX cleared s playCmd =
         isRight =
             s.playerWidth > 0 && tapX > s.playerWidth * 0.65
 
+        seekDelta =
+            proportionalSeekDelta s.playerWidth s.mediaState.duration s.playerWidth
+
         seekCmd =
             if isLeft then
-                Media.seek config.mediaId (max 0 (s.mediaState.currentTime - 10))
+                Media.seek config.mediaId (max 0 (s.mediaState.currentTime - seekDelta))
             else if isRight then
-                Media.seek config.mediaId (min s.mediaState.duration (s.mediaState.currentTime + 10))
+                Media.seek config.mediaId (min s.mediaState.duration (s.mediaState.currentTime + seekDelta))
             else
                 playCmd
     in
@@ -1390,6 +1447,18 @@ handleDoubleTap config tapX cleared s playCmd =
     , seekCmd
     , Nothing
     )
+
+
+proportionalSeekDelta : Float -> Float -> Float -> Float
+proportionalSeekDelta playerWidth videoDuration dx =
+    let
+        rawDelta =
+            if playerWidth > 0 then
+                abs dx / playerWidth * videoDuration * 0.1
+            else
+                10.0
+    in
+    max 5.0 (min 30.0 rawDelta)
 
 
 updateHls : Config -> HlsInternalMsg -> StateRecord -> ( State, Cmd Msg, Maybe OutMsg )
@@ -1460,7 +1529,12 @@ updateHls config hlsMsg s =
             ( State { s | currentQualityIndex = newIndex }, Cmd.none, outMsg )
 
         HlsError _ isFatal ->
-            ( State s
+            ( State
+                { s
+                    | hasError = isFatal || s.hasError
+                    , lastError =
+                        if isFatal then Just Media.NetworkError else s.lastError
+                }
             , Cmd.none
             , if isFatal then Just (PlaybackError Media.NetworkError) else Nothing
             )
@@ -1813,6 +1887,115 @@ view config (State s) =
                 Lazy.lazy2 controlsBar config s
               else
                 Html.text ""
+            , if config.keyboardShortcuts && config.showKeyboardHelp && s.keyboardHelpVisible then
+                keyboardHelpOverlay
+              else
+                Html.text ""
+            ]
+        ]
+
+
+keyboardHelpOverlay : Html.Html Msg
+keyboardHelpOverlay =
+    let
+        row key_ action =
+            Html.tr []
+                [ Html.td
+                    [ Css.inlineStyle
+                        [ Css.padding2 (Css.Value.px 3) (Css.Value.px 8)
+                        , Css.fontFamily [ "monospace" ]
+                        , Css.fontSize (Css.Value.rem 0.8125)
+                        , Css.property "white-space" "nowrap"
+                        , Css.textAlign Css.Value.right_
+                        ]
+                    ]
+                    [ Html.text key_ ]
+                , Html.td
+                    [ Css.inlineStyle
+                        [ Css.padding2 (Css.Value.px 3) (Css.Value.px 8)
+                        , Css.fontSize (Css.Value.rem 0.8125)
+                        ]
+                    ]
+                    [ Html.text action ]
+                ]
+
+        shortcuts =
+            [ ( "Space / k", "Play / Pause" )
+            , ( "← / j", "Rewind 10 s" )
+            , ( "→ / l", "Forward 10 s" )
+            , ( "↑", "Volume up" )
+            , ( "↓", "Volume down" )
+            , ( "m", "Mute / Unmute" )
+            , ( "f", "Fullscreen" )
+            , ( "p", "Picture-in-Picture" )
+            , ( "c", "Toggle captions" )
+            , ( ">", "Speed up" )
+            , ( "<", "Speed down" )
+            , ( "0–9", "Jump to 0%–90%" )
+            , ( "Home", "Jump to start" )
+            , ( "End", "Jump to end" )
+            , ( "?", "This help" )
+            ]
+    in
+    Html.div
+        [ Css.inlineStyle
+            [ Css.position Css.Value.absolute
+            , Css.top Css.Value.zero
+            , Css.left Css.Value.zero
+            , Css.right Css.Value.zero
+            , Css.bottom Css.Value.zero
+            , Css.backgroundColor (Css.Value.rgba 0 0 0 0.85)
+            , Css.property "color" "#ffffff"
+            , Css.display Css.Value.flex_
+            , Css.alignItems Css.Value.center
+            , Css.justifyContent Css.Value.center
+            , Css.zIndex (Css.Value.int_ 50)
+            ]
+        , Attr.attribute "role" "dialog"
+        , Attr.attribute "aria-modal" "true"
+        , Attr.attribute "aria-label" "Keyboard shortcuts"
+        ]
+        [ Html.div
+            [ Css.inlineStyle
+                [ Css.position Css.Value.relative
+                , Css.backgroundColor (Css.Value.rgba 255 255 255 0.1)
+                , Css.borderRadius (Css.Value.px 8)
+                , Css.padding (Css.Value.px 24)
+                , Css.minWidth (Css.Value.px 240)
+                ]
+            ]
+            [ Html.button
+                [ Css.inlineStyle
+                    [ Css.position Css.Value.absolute
+                    , Css.top (Css.Value.px 8)
+                    , Css.right (Css.Value.px 8)
+                    , Css.property "background" "none"
+                    , Css.property "border" "none"
+                    , Css.property "color" "inherit"
+                    , Css.cursor Css.Value.pointer
+                    , Css.fontSize (Css.Value.rem 1.25)
+                    , Css.padding2 (Css.Value.px 2) (Css.Value.px 6)
+                    ]
+                , Attr.attribute "aria-label" "Close keyboard shortcuts"
+                , Events.onClick ToggleKeyboardHelp
+                ]
+                [ Html.text "×" ]
+            , Html.h2
+                [ Css.inlineStyle
+                    [ Css.fontSize (Css.Value.rem 0.9375)
+                    , Css.property "font-weight" "600"
+                    , Css.marginBottom (Css.Value.px 12)
+                    , Css.property "margin-top" "0"
+                    ]
+                ]
+                [ Html.text "Keyboard shortcuts" ]
+            , Html.node "table"
+                [ Css.inlineStyle
+                    [ Css.property "border-collapse" "collapse"
+                    , Css.width (Css.Value.pct 100)
+                    ]
+                ]
+                [ Html.node "tbody" [] (List.map (\( k, a ) -> row k a) shortcuts) ]
             ]
         ]
 
@@ -1828,20 +2011,57 @@ videoElement config s =
                 Nothing ->
                     []
 
-        srcAttrs =
-            case config.source of
+        toSourceElement src =
+            case src of
                 Plain url maybeMime ->
-                    maybeMime
-                        |> Maybe.map
-                            (\mime ->
-                                [ Attr.attribute "type" mime
-                                , Attr.attribute "src" url
-                                ]
+                    Just
+                        (Html.node "source"
+                            (Attr.attribute "src" url
+                                :: (maybeMime
+                                        |> Maybe.map (\m -> [ Attr.attribute "type" m ])
+                                        |> Maybe.withDefault []
+                                   )
                             )
-                        |> Maybe.withDefault [ Attr.attribute "src" url ]
+                            []
+                        )
 
                 _ ->
-                    []
+                    Nothing
+
+        ( srcAttrs, sourceChildren ) =
+            case ( config.source, List.isEmpty config.sources ) of
+                ( Plain url maybeMime, True ) ->
+                    -- Single plain source: use src= attribute (existing behaviour)
+                    ( maybeMime
+                        |> Maybe.map (\mime -> [ Attr.attribute "type" mime, Attr.attribute "src" url ])
+                        |> Maybe.withDefault [ Attr.attribute "src" url ]
+                    , []
+                    )
+
+                ( Plain _ _, False ) ->
+                    -- Multi-source fallback chain: use <source> children only
+                    ( []
+                    , List.filterMap toSourceElement (config.source :: config.sources)
+                    )
+
+                _ ->
+                    -- HLS / DASH: streaming library attaches the source, no src= needed
+                    ( [], [] )
+
+        externalTrackChildren =
+            List.map
+                (\t ->
+                    Html.node "track"
+                        ([ Attr.attribute "src" t.url
+                         , Attr.attribute "label" t.label
+                         , Attr.attribute "srclang" t.language
+                         , Attr.attribute "kind" t.kind
+                         ]
+                            ++ (if t.default then [ Attr.attribute "default" "" ] else [])
+                        )
+                        []
+                )
+                config.externalCaptionTracks
 
         -- Extended state decoder: captures currentTime, duration, paused,
         -- muted, volume, playbackRate, readyState, ended, and error.
@@ -1916,7 +2136,7 @@ videoElement config s =
          , Events.on "progress" (Decode.succeed FetchBuffered)
          , Events.on "waiting" stateDecoder
          ] ++ posterAttr ++ srcAttrs)
-        []
+        (sourceChildren ++ externalTrackChildren)
 
 
 bigPlayButton : StateRecord -> Html.Html Msg
@@ -2272,10 +2492,34 @@ controlsBar config s =
                 { onToggle = ToggleRemotePlayback
                 , remoteAvailable = s.remoteAvailable
                 }
-            , Video.Controls.fullscreenButton
-                { onToggle = ToggleFullscreen
-                , isFullscreen = s.isFullscreen
-                }
+            , if not s.fullscreenUnavailable then
+                Video.Controls.fullscreenButton
+                    { onToggle = ToggleFullscreen
+                    , isFullscreen = s.isFullscreen
+                    }
+              else
+                Html.text ""
+            , if config.keyboardShortcuts && config.showKeyboardHelp then
+                Html.button
+                    [ Css.inlineStyle
+                        [ Css.width (Css.Value.px 40)
+                        , Css.height (Css.Value.px 40)
+                        , Css.property "background" "none"
+                        , Css.property "border" "none"
+                        , Css.color Css.Value.inherit_
+                        , Css.cursor Css.Value.pointer
+                        , Css.fontSize (Css.Value.rem 0.875)
+                        , Css.padding Css.Value.zero
+                        , Css.borderRadius (Css.Value.px 4)
+                        ]
+                    , Attr.attribute "aria-label" "Keyboard shortcuts"
+                    , Attr.attribute "aria-expanded"
+                        (if s.keyboardHelpVisible then "true" else "false")
+                    , Events.onClick ToggleKeyboardHelp
+                    ]
+                    [ Html.text "?" ]
+              else
+                Html.text ""
             ]
         ]
 
@@ -2416,10 +2660,14 @@ touchEndDecoder =
 Each non-header cue block should have an image URL with an `#xywh=x,y,w,h`
 fragment identifying the sprite region.
 
+Handles all three line ending conventions (`\r\n`, `\r`, `\n`).
+
 -}
 parseSpriteVtt : String -> List ThumbnailSprite
 parseSpriteVtt content =
     content
+        |> String.replace "\r\n" "\n"
+        |> String.replace "\r" "\n"
         |> String.split "\n\n"
         |> List.filterMap parseSpriteBlock
 
@@ -2456,10 +2704,10 @@ parseSpriteTimesAndImage timeLine imageLine =
             String.split " --> " timeLine
 
         startMaybe =
-            List.head timeParts |> Maybe.map parseVttTime
+            List.head timeParts |> Maybe.andThen parseVttTime
 
         endMaybe =
-            List.drop 1 timeParts |> List.head |> Maybe.map parseVttTime
+            List.drop 1 timeParts |> List.head |> Maybe.andThen parseVttTime
     in
     Maybe.andThen
         (\start ->
@@ -2495,10 +2743,12 @@ parseSpriteImage startTime endTime imageLine =
 
 {-| Parse a VTT time string (HH:MM:SS.mmm or MM:SS.mmm) into seconds.
 
-Returns 0.0 for malformed input.
+Returns `Nothing` for malformed input. Note that `Just 0.0` is a valid
+result for the timestamp `"00:00:00.000"`, so callers can reliably
+distinguish a successful parse of zero from a parse failure.
 
 -}
-parseVttTime : String -> Float
+parseVttTime : String -> Maybe Float
 parseVttTime timeStr =
     let
         msPart =
@@ -2520,13 +2770,13 @@ parseVttTime timeStr =
     in
     case timeParts of
         [ h, m, sec ] ->
-            toFloat (h * 3600 + m * 60 + sec) + msPart
+            Just (toFloat (h * 3600 + m * 60 + sec) + msPart)
 
         [ m, sec ] ->
-            toFloat (m * 60 + sec) + msPart
+            Just (toFloat (m * 60 + sec) + msPart)
 
         _ ->
-            0
+            Nothing
 
 
 formatAnnounceTime : Float -> String
@@ -2725,3 +2975,51 @@ chapters (State s) =
 thumbnailSprites : State -> List ThumbnailSprite
 thumbnailSprites (State s) =
     s.thumbnailSprites
+
+
+{-| Seconds of video buffered ahead of the current playback position.
+
+Computed from the buffered time ranges without any additional JS calls.
+Returns `0.0` if no buffered range contains the current playhead position.
+
+-}
+bufferAhead : State -> Float
+bufferAhead (State s) =
+    let
+        ct =
+            s.mediaState.currentTime
+    in
+    s.mediaState.buffered
+        |> List.filter (\r -> r.start <= ct && ct < r.end)
+        |> List.head
+        |> Maybe.map (\r -> r.end - ct)
+        |> Maybe.withDefault 0.0
+
+
+{-| Total seconds across all buffered time ranges.
+
+Useful as a rough measure of total network-cached content. Returns `0.0`
+when nothing is buffered.
+
+-}
+totalBuffered : State -> Float
+totalBuffered (State s) =
+    List.foldl (\r acc -> acc + (r.end - r.start)) 0.0 s.mediaState.buffered
+
+
+{-| Whether the keyboard shortcut help overlay is currently visible. -}
+keyboardHelpVisible : State -> Bool
+keyboardHelpVisible (State s) =
+    s.keyboardHelpVisible
+
+
+{-| Whether fullscreen mode is unavailable in the current browser context.
+
+Becomes `True` after a fullscreen request was sent but the fullscreen
+state did not transition to active — for example in iframes without the
+`allowfullscreen` attribute. When `True` the fullscreen button is hidden.
+
+-}
+fullscreenUnavailable : State -> Bool
+fullscreenUnavailable (State s) =
+    s.fullscreenUnavailable
